@@ -1,0 +1,12 @@
+/.env.local
+
+node_modules/
+dist/
+coverage/
+plugin-dist/
+target/
+packages/app/bin/*.map
+packages/app/plugin-dist/
+packages/app/coverage/
+.DS_Store
+npm-debug.log*

@@ -1,0 +1,30 @@
+{
+  "name": "obsidian-wikipage-spine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monorepo for WikiPage Spine dataset tooling, CLI, and Obsidian plugin.",
+  "type": "commonjs",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=wikipage-spine",
+    "build:plugin": "npm run build:plugin --workspace=wikipage-spine",
+    "build:cli": "npm run build:cli --workspace=wikipage-spine",
+    "prepare:plugin": "npm run prepare:plugin --workspace=wikipage-spine",
+    "install:plugin": "npm run install:plugin --workspace=wikipage-spine",
+    "test": "npm run test --workspace=wikipage-spine",
+    "test:coverage": "npm run test:coverage --workspace=wikipage-spine",
+    "typecheck": "npm run typecheck --workspace=wikipage-spine",
+    "check": "npm run check --workspace=wikipage-spine"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moskize91/obsidian-wikipage-spine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moskize91/obsidian-wikipage-spine/issues"
+  },
+  "homepage": "https://github.com/moskize91/obsidian-wikipage-spine"
+}

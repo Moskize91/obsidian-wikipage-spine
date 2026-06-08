@@ -1,0 +1,49 @@
+{
+  "name": "wikipage-spine",
+  "version": "0.1.0",
+  "description": "WikiPage Spine CLI and Obsidian plugin.",
+  "main": "plugin-dist/main.js",
+  "bin": {
+    "wikipage-spine": "bin/wikipage-spine.mjs"
+  },
+  "type": "commonjs",
+  "scripts": {
+    "build": "npm run build:cli && npm run prepare:plugin",
+    "build:plugin": "tsup --config tsup.plugin.config.ts",
+    "build:cli": "tsup --config tsup.cli.config.ts",
+    "prepare:plugin": "npm run build:plugin && cp manifest.json plugin-dist/manifest.json && if [ -f styles.css ]; then cp styles.css plugin-dist/styles.css; fi",
+    "install:plugin": "npm run prepare:plugin && node scripts/install-plugin-dev.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test:coverage && npm run build"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "wikipage",
+    "wiki",
+    "knowledge-graph"
+  ],
+  "author": "Moskize91",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moskize91/obsidian-wikipage-spine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moskize91/obsidian-wikipage-spine/issues"
+  },
+  "homepage": "https://github.com/moskize91/obsidian-wikipage-spine",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.1",
+    "@vitest/coverage-v8": "^4.1.8",
+    "obsidian": "^1.13.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

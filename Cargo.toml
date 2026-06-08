@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "crates/dataset-builder"
+]
+resolver = "2"

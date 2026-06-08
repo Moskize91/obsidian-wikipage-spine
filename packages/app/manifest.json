@@ -1,0 +1,10 @@
+{
+  "id": "wikipage-spine",
+  "name": "WikiPage Spine",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.0",
+  "description": "Connects Obsidian notes with a local WikiPage-backed knowledge spine.",
+  "author": "Moskize91",
+  "authorUrl": "https://github.com/moskize91",
+  "isDesktopOnly": true
+}
