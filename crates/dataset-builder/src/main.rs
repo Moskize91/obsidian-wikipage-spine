@@ -1,9 +1,15 @@
+extern crate alloc;
+
+#[allow(dead_code, unused_imports)]
+mod compact_ac;
+
+use crate::compact_ac::{CharwiseDoubleArrayAhoCorasickBuilder, DoubleArrayAhoCorasickBuilder};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_USER_AGENT: &str =
     "obsidian-wikipage-spine-dataset-builder/0.1 (+https://github.com/moskize91/obsidian-wikipage-spine)";
 const WIKIMEDIA_DUMPS_BASE: &str = "https://dumps.wikimedia.org";
+const DAACHORSE_MAX_PATTERNS: usize = (1 << 24) - 1;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -97,6 +104,7 @@ fn main() -> Result<()> {
     match command.as_str() {
         "download" => download(parse_download_args(args.collect())?),
         "process" | "preprocess" => preprocess(parse_process_args(args.collect())?),
+        "compile" => compile(parse_compile_args(args.collect())?),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -122,6 +130,50 @@ impl Default for ProcessArgs {
             wikis: vec!["zhwiki".to_string(), "enwiki".to_string()],
             date: "latest".to_string(),
             limit: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompileMode {
+    Charwise,
+    Bytewise,
+}
+
+impl CompileMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "charwise" | "char" => Ok(Self::Charwise),
+            "bytewise" | "byte" => Ok(Self::Bytewise),
+            _ => Err(CliError(format!("unknown compile mode: {value}")).into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Charwise => "charwise",
+            Self::Bytewise => "bytewise",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompileArgs {
+    preprocess: PathBuf,
+    out: PathBuf,
+    mode: CompileMode,
+    limit: Option<usize>,
+    progress_every: usize,
+}
+
+impl Default for CompileArgs {
+    fn default() -> Self {
+        Self {
+            preprocess: PathBuf::from("crates/data/preprocess"),
+            out: PathBuf::from("crates/data/compile"),
+            mode: CompileMode::Charwise,
+            limit: None,
+            progress_every: 100_000,
         }
     }
 }
@@ -240,6 +292,56 @@ fn parse_process_args(raw_args: Vec<String>) -> Result<ProcessArgs> {
     Ok(args)
 }
 
+fn parse_compile_args(raw_args: Vec<String>) -> Result<CompileArgs> {
+    let mut args = CompileArgs::default();
+    let mut index = 0;
+
+    while index < raw_args.len() {
+        match raw_args[index].as_str() {
+            "--preprocess" => {
+                index += 1;
+                args.preprocess = PathBuf::from(require_value(&raw_args, index, "--preprocess")?);
+            }
+            "--out" => {
+                index += 1;
+                args.out = PathBuf::from(require_value(&raw_args, index, "--out")?);
+            }
+            "--mode" => {
+                index += 1;
+                args.mode = CompileMode::parse(require_value(&raw_args, index, "--mode")?)?;
+            }
+            "--limit" => {
+                index += 1;
+                let value = require_value(&raw_args, index, "--limit")?;
+                args.limit = Some(value.parse::<usize>().map_err(|err| {
+                    CliError(format!("--limit must be a positive integer: {err}"))
+                })?);
+            }
+            "--progress-every" => {
+                index += 1;
+                let value = require_value(&raw_args, index, "--progress-every")?;
+                args.progress_every = value.parse::<usize>().map_err(|err| {
+                    CliError(format!(
+                        "--progress-every must be a positive integer: {err}"
+                    ))
+                })?;
+            }
+            "-h" | "--help" => {
+                print_compile_help();
+                std::process::exit(0);
+            }
+            unknown => return Err(CliError(format!("unknown compile option: {unknown}")).into()),
+        }
+        index += 1;
+    }
+
+    if args.progress_every == 0 {
+        return Err(CliError("--progress-every must be greater than zero".to_string()).into());
+    }
+
+    Ok(args)
+}
+
 fn require_value<'a>(args: &'a [String], index: usize, option: &str) -> Result<&'a str> {
     args.get(index)
         .map(String::as_str)
@@ -349,6 +451,267 @@ fn preprocess(args: ProcessArgs) -> Result<()> {
         println!("{summary}");
     }
 
+    Ok(())
+}
+
+fn compile(args: CompileArgs) -> Result<()> {
+    let input_path = args.preprocess.join("surface_qids.tsv");
+    if !input_path.exists() {
+        return Err(CliError(format!("missing preprocess file: {}", input_path.display())).into());
+    }
+
+    let tmp_dir = compile_tmp_dir(&args.out);
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)?;
+    }
+    if args.out.exists() {
+        fs::remove_dir_all(&args.out)?;
+    }
+    fs::create_dir_all(&tmp_dir)?;
+
+    let progress_path = tmp_dir.join("progress.tsv");
+    write_compile_progress(&progress_path, "ingest_started", 0, 0)?;
+
+    let mut patterns = Vec::<String>::new();
+    let mut pattern_bytes = 0usize;
+    let input = File::open(&input_path)?;
+    let reader = BufReader::new(input);
+
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line_number == 0 {
+            validate_surface_qids_header(&line)?;
+            continue;
+        }
+        if let Some(limit) = args.limit {
+            if patterns.len() >= limit {
+                break;
+            }
+        }
+        if patterns.len() >= DAACHORSE_MAX_PATTERNS {
+            write_compile_progress(
+                &progress_path,
+                "daachorse_pattern_limit_reached",
+                patterns.len(),
+                pattern_bytes,
+            )?;
+            return Err(CliError(format!(
+                "Daachorse supports at most {DAACHORSE_MAX_PATTERNS} patterns; stopped before surface_id={}",
+                patterns.len()
+            ))
+            .into());
+        }
+
+        let Some(surface_key) = first_tsv_column(&line) else {
+            return Err(CliError(format!(
+                "invalid surface_qids row without tab at line {}",
+                line_number + 1
+            ))
+            .into());
+        };
+        let surface_key = unescape_tsv(surface_key);
+        if surface_key.is_empty() {
+            return Err(CliError(format!(
+                "empty surface_key at surface_qids.tsv line {}",
+                line_number + 1
+            ))
+            .into());
+        }
+
+        pattern_bytes += surface_key.len();
+        patterns.push(surface_key);
+
+        if patterns.len() % args.progress_every == 0 {
+            eprintln!(
+                "ingested surface_id={} surfaces={} pattern_bytes={}",
+                patterns.len() - 1,
+                patterns.len(),
+                pattern_bytes
+            );
+            write_compile_progress(&progress_path, "ingesting", patterns.len(), pattern_bytes)?;
+        }
+    }
+
+    if patterns.is_empty() {
+        return Err(CliError("no surface keys found for compile".to_string()).into());
+    }
+
+    eprintln!(
+        "building {} automaton surfaces={} pattern_bytes={}",
+        args.mode.as_str(),
+        patterns.len(),
+        pattern_bytes
+    );
+    let surface_count = patterns.len();
+    write_compile_progress(
+        &progress_path,
+        "build_started",
+        surface_count,
+        pattern_bytes,
+    )?;
+
+    let automaton_bytes = build_automaton_bytes(patterns, args.mode)?;
+    let automaton_path = tmp_dir.join("automaton.bin");
+    let mut automaton_file = BufWriter::new(File::create(&automaton_path)?);
+    automaton_file.write_all(&automaton_bytes)?;
+    automaton_file.flush()?;
+
+    let automaton_size = automaton_path.metadata()?.len();
+    write_compile_manifest(
+        &tmp_dir.join("manifest.json"),
+        &args,
+        &input_path,
+        surface_count,
+        pattern_bytes,
+        automaton_size,
+    )?;
+    write_compile_progress(&progress_path, "done", surface_count, pattern_bytes)?;
+
+    fs::rename(&tmp_dir, &args.out)?;
+    eprintln!(
+        "wrote {} ({} bytes)",
+        args.out.join("automaton.bin").display(),
+        automaton_size
+    );
+
+    Ok(())
+}
+
+fn build_automaton_bytes(patterns: Vec<String>, mode: CompileMode) -> Result<Vec<u8>> {
+    match mode {
+        CompileMode::Charwise => {
+            let entries = patterns
+                .into_iter()
+                .enumerate()
+                .map(|(surface_id, pattern)| (pattern, checked_surface_id(surface_id)));
+            let automaton = CharwiseDoubleArrayAhoCorasickBuilder::new()
+                .build_with_values(entries)
+                .map_err(|err| CliError(format!("failed to build charwise automaton: {err}")))?;
+            Ok(automaton.serialize())
+        }
+        CompileMode::Bytewise => {
+            let entries = patterns
+                .into_iter()
+                .enumerate()
+                .map(|(surface_id, pattern)| {
+                    (pattern.into_bytes(), checked_surface_id(surface_id))
+                });
+            let automaton = DoubleArrayAhoCorasickBuilder::new()
+                .build_with_values(entries)
+                .map_err(|err| CliError(format!("failed to build bytewise automaton: {err}")))?;
+            Ok(automaton.serialize())
+        }
+    }
+}
+
+fn checked_surface_id(surface_id: usize) -> u32 {
+    u32::try_from(surface_id).expect("surface_id overflowed u32")
+}
+
+fn compile_tmp_dir(out: &Path) -> PathBuf {
+    let file_name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("compile");
+    out.with_file_name(format!("{file_name}.tmp"))
+}
+
+fn validate_surface_qids_header(line: &str) -> Result<()> {
+    if line == "surface_key\tqids\tqid_count" {
+        Ok(())
+    } else {
+        Err(CliError(format!("unexpected surface_qids.tsv header: {line}")).into())
+    }
+}
+
+fn first_tsv_column(line: &str) -> Option<&str> {
+    line.split_once('\t').map(|(first, _rest)| first)
+}
+
+fn unescape_tsv(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => output.push('\\'),
+            Some('t') => output.push('\t'),
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn write_compile_progress(
+    path: &Path,
+    phase: &str,
+    surface_count: usize,
+    pattern_bytes: usize,
+) -> Result<()> {
+    let mut file = File::create(path)?;
+    writeln!(file, "phase\tsurface_count\tlast_surface_id\tpattern_bytes")?;
+    let last_surface_id = surface_count
+        .checked_sub(1)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-1".to_string());
+    writeln!(
+        file,
+        "{}\t{}\t{}\t{}",
+        phase, surface_count, last_surface_id, pattern_bytes
+    )?;
+    file.flush()?;
+    Ok(())
+}
+
+fn write_compile_manifest(
+    path: &Path,
+    args: &CompileArgs,
+    input_path: &Path,
+    surface_count: usize,
+    pattern_bytes: usize,
+    automaton_size: u64,
+) -> Result<()> {
+    let mut file = File::create(path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"generated_at_unix\": {},", generated_at_unix())?;
+    writeln!(file, "  \"mode\": \"{}\",", args.mode.as_str())?;
+    writeln!(
+        file,
+        "  \"preprocess\": \"{}\",",
+        escape_json(&path_for_manifest(&args.preprocess))
+    )?;
+    writeln!(
+        file,
+        "  \"input\": \"{}\",",
+        escape_json(&path_for_manifest(input_path))
+    )?;
+    writeln!(
+        file,
+        "  \"out\": \"{}\",",
+        escape_json(&path_for_manifest(&args.out))
+    )?;
+    match args.limit {
+        Some(limit) => writeln!(file, "  \"limit\": {limit},")?,
+        None => writeln!(file, "  \"limit\": null,")?,
+    }
+    writeln!(file, "  \"surface_count\": {surface_count},")?;
+    writeln!(file, "  \"pattern_bytes\": {pattern_bytes},")?;
+    writeln!(file, "  \"automaton_bytes\": {automaton_size},")?;
+    writeln!(file, "  \"files\": [")?;
+    writeln!(file, "    \"automaton.bin\",")?;
+    writeln!(file, "    \"manifest.json\",")?;
+    writeln!(file, "    \"progress.tsv\"")?;
+    writeln!(file, "  ]")?;
+    writeln!(file, "}}")?;
     Ok(())
 }
 
@@ -1055,6 +1418,7 @@ fn print_help() {
     println!("Commands:");
     println!("  download    Download upstream Wikimedia dump files");
     println!("  preprocess  Extract surface_key -> QID[] rows from downloaded dumps");
+    println!("  compile     Compile surface keys into an Aho-Corasick automaton");
     println!();
     println!("Run `wikipage-spine-dataset-builder download --help` for download options.");
 }
@@ -1086,4 +1450,64 @@ fn print_process_help() {
     println!("  --wikis <csv>                Wiki DB names (default: zhwiki,enwiki)");
     println!("  --date <latest|YYYYMMDD>     Dump date (default: latest)");
     println!("  --limit <n>                  Debug limit for parsed INSERT tuples per table");
+}
+
+fn print_compile_help() {
+    println!("Usage:");
+    println!("  wikipage-spine-dataset-builder compile [options]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --preprocess <dir>           Preprocess directory (default: crates/data/preprocess)"
+    );
+    println!("  --out <dir>                  Output directory (default: crates/data/compile)");
+    println!("  --mode <charwise|bytewise>   Daachorse automaton mode (default: charwise)");
+    println!("  --limit <n>                  Debug limit for surface rows");
+    println!("  --progress-every <n>         Progress interval (default: 100000)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compact_ac::{CharwiseDoubleArrayAhoCorasick, DoubleArrayAhoCorasick};
+
+    #[test]
+    fn charwise_automaton_preserves_surface_ids_after_serialize() {
+        let bytes = build_automaton_bytes(
+            vec![
+                "北京".to_string(),
+                "北京大学".to_string(),
+                "大学".to_string(),
+            ],
+            CompileMode::Charwise,
+        )
+        .unwrap();
+        let (automaton, rest) = CharwiseDoubleArrayAhoCorasick::<u32>::deserialize(&bytes).unwrap();
+        assert!(rest.is_empty());
+
+        let hits = automaton
+            .find_overlapping_iter("我在北京大学")
+            .map(|m| (m.start(), m.end(), m.value()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(hits, vec![(6, 12, 0), (6, 18, 1), (12, 18, 2)]);
+    }
+
+    #[test]
+    fn bytewise_automaton_preserves_surface_ids_after_serialize() {
+        let bytes = build_automaton_bytes(
+            vec!["bcd".to_string(), "ab".to_string(), "a".to_string()],
+            CompileMode::Bytewise,
+        )
+        .unwrap();
+        let (automaton, rest) = DoubleArrayAhoCorasick::<u32>::deserialize(&bytes).unwrap();
+        assert!(rest.is_empty());
+
+        let hits = automaton
+            .find_overlapping_iter("abcd")
+            .map(|m| (m.start(), m.end(), m.value()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(hits, vec![(0, 1, 2), (0, 2, 1), (1, 4, 0)]);
+    }
 }
