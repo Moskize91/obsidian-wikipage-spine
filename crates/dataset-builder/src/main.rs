@@ -9,7 +9,7 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{copy, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,6 +104,7 @@ fn main() -> Result<()> {
         "download" => download(parse_download_args(args.collect())?),
         "process" | "preprocess" => preprocess(parse_process_args(args.collect())?),
         "compile" => compile(parse_compile_args(args.collect())?),
+        "postprocess" => postprocess(parse_postprocess_args(args.collect())?),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -172,6 +173,25 @@ impl Default for CompileArgs {
             out: PathBuf::from("crates/data/compile"),
             mode: CompileMode::Charwise,
             limit: None,
+            progress_every: 100_000,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PostprocessArgs {
+    preprocess: PathBuf,
+    compile: PathBuf,
+    out: PathBuf,
+    progress_every: usize,
+}
+
+impl Default for PostprocessArgs {
+    fn default() -> Self {
+        Self {
+            preprocess: PathBuf::from("crates/data/preprocess"),
+            compile: PathBuf::from("crates/data/compile"),
+            out: PathBuf::from("crates/data/runtime"),
             progress_every: 100_000,
         }
     }
@@ -330,6 +350,51 @@ fn parse_compile_args(raw_args: Vec<String>) -> Result<CompileArgs> {
                 std::process::exit(0);
             }
             unknown => return Err(CliError(format!("unknown compile option: {unknown}")).into()),
+        }
+        index += 1;
+    }
+
+    if args.progress_every == 0 {
+        return Err(CliError("--progress-every must be greater than zero".to_string()).into());
+    }
+
+    Ok(args)
+}
+
+fn parse_postprocess_args(raw_args: Vec<String>) -> Result<PostprocessArgs> {
+    let mut args = PostprocessArgs::default();
+    let mut index = 0;
+
+    while index < raw_args.len() {
+        match raw_args[index].as_str() {
+            "--preprocess" => {
+                index += 1;
+                args.preprocess = PathBuf::from(require_value(&raw_args, index, "--preprocess")?);
+            }
+            "--compile" => {
+                index += 1;
+                args.compile = PathBuf::from(require_value(&raw_args, index, "--compile")?);
+            }
+            "--out" => {
+                index += 1;
+                args.out = PathBuf::from(require_value(&raw_args, index, "--out")?);
+            }
+            "--progress-every" => {
+                index += 1;
+                let value = require_value(&raw_args, index, "--progress-every")?;
+                args.progress_every = value.parse::<usize>().map_err(|err| {
+                    CliError(format!(
+                        "--progress-every must be a positive integer: {err}"
+                    ))
+                })?;
+            }
+            "-h" | "--help" => {
+                print_postprocess_help();
+                std::process::exit(0);
+            }
+            unknown => {
+                return Err(CliError(format!("unknown postprocess option: {unknown}")).into())
+            }
         }
         index += 1;
     }
@@ -560,6 +625,405 @@ fn compile(args: CompileArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct RuntimeQidStats {
+    surface_count: usize,
+    qid_value_count: usize,
+    max_qid: u32,
+}
+
+#[derive(Debug)]
+struct RuntimeAutomatonStats {
+    automaton_bytes: u64,
+    states_len: u32,
+    mapper_table_len: u32,
+    alphabet_size: u32,
+    output_count: u32,
+    match_kind: u8,
+    num_states: u32,
+}
+
+fn postprocess(args: PostprocessArgs) -> Result<()> {
+    let surface_qids_path = args.preprocess.join("surface_qids.tsv");
+    if !surface_qids_path.exists() {
+        return Err(CliError(format!(
+            "missing preprocess file: {}",
+            surface_qids_path.display()
+        ))
+        .into());
+    }
+    let automaton_path = args.compile.join("automaton.bin");
+    if !automaton_path.exists() {
+        return Err(CliError(format!(
+            "missing compile file: {}",
+            automaton_path.display()
+        ))
+        .into());
+    }
+
+    let tmp_dir = postprocess_tmp_dir(&args.out);
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)?;
+    }
+    if args.out.exists() {
+        fs::remove_dir_all(&args.out)?;
+    }
+
+    let automaton_out_dir = tmp_dir.join("automaton");
+    let qids_out_dir = tmp_dir.join("qids");
+    fs::create_dir_all(&automaton_out_dir)?;
+    fs::create_dir_all(&qids_out_dir)?;
+
+    eprintln!("postprocessing qid tables");
+    let (surface_utf16_lengths, qid_stats) =
+        write_runtime_qid_tables(&surface_qids_path, &qids_out_dir, args.progress_every)?;
+
+    eprintln!("postprocessing automaton tables");
+    let automaton_stats = write_runtime_automaton_tables(
+        &automaton_path,
+        &automaton_out_dir,
+        &surface_utf16_lengths,
+        args.progress_every,
+    )?;
+    if automaton_stats.output_count as usize != qid_stats.surface_count {
+        return Err(CliError(format!(
+            "automaton output count {} does not match surface count {}",
+            automaton_stats.output_count, qid_stats.surface_count
+        ))
+        .into());
+    }
+
+    write_runtime_manifest(
+        &tmp_dir.join("manifest.json"),
+        &args,
+        &surface_qids_path,
+        &automaton_path,
+        &qid_stats,
+        &automaton_stats,
+    )?;
+
+    fs::rename(&tmp_dir, &args.out)?;
+    eprintln!("wrote {}", args.out.display());
+
+    Ok(())
+}
+
+fn write_runtime_qid_tables(
+    surface_qids_path: &Path,
+    qids_out_dir: &Path,
+    progress_every: usize,
+) -> Result<(Vec<u32>, RuntimeQidStats)> {
+    let mut qid_index = BufWriter::new(File::create(qids_out_dir.join("qid_index.bin"))?);
+    let mut qid_values = BufWriter::new(File::create(qids_out_dir.join("qid_values.bin"))?);
+    let input = File::open(surface_qids_path)?;
+    let reader = BufReader::new(input);
+
+    let mut surface_utf16_lengths = Vec::<u32>::new();
+    let mut qid_value_count = 0usize;
+    let mut max_qid = 0u32;
+
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line_number == 0 {
+            validate_surface_qids_header(&line)?;
+            continue;
+        }
+
+        let (surface_key, qids, qid_count) = parse_surface_qids_row(&line, line_number + 1)?;
+        let utf16_len = u32::try_from(surface_key.encode_utf16().count()).map_err(|_| {
+            CliError(format!(
+                "surface_key UTF-16 length overflow at line {}",
+                line_number + 1
+            ))
+        })?;
+        surface_utf16_lengths.push(utf16_len);
+
+        let offset = u32::try_from(qid_value_count)
+            .map_err(|_| CliError("qid value offset overflowed u32".to_string()))?;
+        let length = u32::try_from(qids.len())
+            .map_err(|_| CliError("qid list length overflowed u32".to_string()))?;
+        if qids.len() != qid_count {
+            return Err(CliError(format!(
+                "qid_count mismatch at line {}: parsed {}, declared {}",
+                line_number + 1,
+                qids.len(),
+                qid_count
+            ))
+            .into());
+        }
+        write_u32(&mut qid_index, offset)?;
+        write_u32(&mut qid_index, length)?;
+        for qid in qids {
+            max_qid = max_qid.max(qid);
+            write_u32(&mut qid_values, qid)?;
+            qid_value_count += 1;
+        }
+
+        let surface_count = surface_utf16_lengths.len();
+        if surface_count % progress_every == 0 {
+            eprintln!(
+                "postprocessed qids surface_id={} surfaces={} qid_values={}",
+                surface_count - 1,
+                surface_count,
+                qid_value_count
+            );
+        }
+    }
+
+    qid_index.flush()?;
+    qid_values.flush()?;
+
+    let stats = RuntimeQidStats {
+        surface_count: surface_utf16_lengths.len(),
+        qid_value_count,
+        max_qid,
+    };
+    Ok((surface_utf16_lengths, stats))
+}
+
+fn write_runtime_automaton_tables(
+    automaton_path: &Path,
+    automaton_out_dir: &Path,
+    surface_utf16_lengths: &[u32],
+    progress_every: usize,
+) -> Result<RuntimeAutomatonStats> {
+    let automaton_bytes = automaton_path.metadata()?.len();
+    let input = File::open(automaton_path)?;
+    let mut reader = BufReader::new(input);
+
+    let states_len = read_u32(&mut reader)?;
+    let mut states_out = BufWriter::new(File::create(automaton_out_dir.join("states.bin"))?);
+    copy_exact_bytes(
+        &mut reader,
+        &mut states_out,
+        u64::from(states_len) * 16,
+        "states",
+    )?;
+    states_out.flush()?;
+
+    let mapper_table_len = read_u32(&mut reader)?;
+    let mut mapper_out = BufWriter::new(File::create(automaton_out_dir.join("char_code_map.bin"))?);
+    copy_exact_bytes(
+        &mut reader,
+        &mut mapper_out,
+        u64::from(mapper_table_len) * 4,
+        "char_code_map",
+    )?;
+    mapper_out.flush()?;
+    let alphabet_size = read_u32(&mut reader)?;
+
+    let output_count = read_u32(&mut reader)?;
+    let mut outputs_out =
+        BufWriter::new(File::create(automaton_out_dir.join("state_outputs.bin"))?);
+    for index in 0..output_count {
+        let surface_id = read_u32(&mut reader)?;
+        let _utf8_len = read_u32(&mut reader)?;
+        let parent_output_pos = read_u32(&mut reader)?;
+        let utf16_len = surface_utf16_lengths
+            .get(surface_id as usize)
+            .copied()
+            .ok_or_else(|| {
+                CliError(format!(
+                    "automaton output references unknown surface_id {surface_id}"
+                ))
+            })?;
+        write_u32(&mut outputs_out, surface_id)?;
+        write_u32(&mut outputs_out, utf16_len)?;
+        write_u32(&mut outputs_out, parent_output_pos)?;
+
+        let done = index as usize + 1;
+        if done % progress_every == 0 {
+            eprintln!(
+                "postprocessed outputs output_id={} outputs={}",
+                done - 1,
+                done
+            );
+        }
+    }
+    outputs_out.flush()?;
+
+    let match_kind = read_u8(&mut reader)?;
+    let num_states = read_u32(&mut reader)?;
+    let mut trailing = [0u8; 1];
+    let trailing_bytes = reader.read(&mut trailing)?;
+    if trailing_bytes != 0 {
+        return Err(CliError("unexpected trailing bytes in automaton.bin".to_string()).into());
+    }
+
+    Ok(RuntimeAutomatonStats {
+        automaton_bytes,
+        states_len,
+        mapper_table_len,
+        alphabet_size,
+        output_count,
+        match_kind,
+        num_states,
+    })
+}
+
+fn write_runtime_manifest(
+    path: &Path,
+    args: &PostprocessArgs,
+    surface_qids_path: &Path,
+    automaton_path: &Path,
+    qid_stats: &RuntimeQidStats,
+    automaton_stats: &RuntimeAutomatonStats,
+) -> Result<()> {
+    let mut file = File::create(path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"format\": \"wikipage-spine-runtime-v1\",")?;
+    writeln!(file, "  \"generated_at_unix\": {},", generated_at_unix())?;
+    writeln!(
+        file,
+        "  \"preprocess\": \"{}\",",
+        escape_json(&path_for_manifest(&args.preprocess))
+    )?;
+    writeln!(
+        file,
+        "  \"compile\": \"{}\",",
+        escape_json(&path_for_manifest(&args.compile))
+    )?;
+    writeln!(
+        file,
+        "  \"input_surface_qids\": \"{}\",",
+        escape_json(&path_for_manifest(surface_qids_path))
+    )?;
+    writeln!(
+        file,
+        "  \"input_automaton\": \"{}\",",
+        escape_json(&path_for_manifest(automaton_path))
+    )?;
+    writeln!(file, "  \"endian\": \"little\",")?;
+    writeln!(file, "  \"mode\": \"charwise\",")?;
+    writeln!(file, "  \"match_kind\": {},", automaton_stats.match_kind)?;
+    writeln!(file, "  \"state_record_bytes\": 16,")?;
+    writeln!(file, "  \"state_output_record_bytes\": 12,")?;
+    writeln!(file, "  \"qid_index_record_bytes\": 8,")?;
+    writeln!(file, "  \"states_len\": {},", automaton_stats.states_len)?;
+    writeln!(file, "  \"num_states\": {},", automaton_stats.num_states)?;
+    writeln!(
+        file,
+        "  \"mapper_table_len\": {},",
+        automaton_stats.mapper_table_len
+    )?;
+    writeln!(
+        file,
+        "  \"alphabet_size\": {},",
+        automaton_stats.alphabet_size
+    )?;
+    writeln!(file, "  \"surface_count\": {},", qid_stats.surface_count)?;
+    writeln!(
+        file,
+        "  \"state_output_count\": {},",
+        automaton_stats.output_count
+    )?;
+    writeln!(
+        file,
+        "  \"qid_value_count\": {},",
+        qid_stats.qid_value_count
+    )?;
+    writeln!(file, "  \"max_qid\": {},", qid_stats.max_qid)?;
+    writeln!(
+        file,
+        "  \"source_automaton_bytes\": {},",
+        automaton_stats.automaton_bytes
+    )?;
+    writeln!(file, "  \"files\": {{")?;
+    writeln!(
+        file,
+        "    \"char_code_map\": \"automaton/char_code_map.bin\","
+    )?;
+    writeln!(file, "    \"states\": \"automaton/states.bin\",")?;
+    writeln!(
+        file,
+        "    \"state_outputs\": \"automaton/state_outputs.bin\","
+    )?;
+    writeln!(file, "    \"qid_index\": \"qids/qid_index.bin\",")?;
+    writeln!(file, "    \"qid_values\": \"qids/qid_values.bin\"")?;
+    writeln!(file, "  }}")?;
+    writeln!(file, "}}")?;
+    Ok(())
+}
+
+fn parse_surface_qids_row(line: &str, line_number: usize) -> Result<(String, Vec<u32>, usize)> {
+    let mut parts = line.splitn(3, '\t');
+    let surface_key = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing surface_key at line {line_number}")))?;
+    let qids = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing qids at line {line_number}")))?;
+    let qid_count = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing qid_count at line {line_number}")))?;
+
+    let surface_key = unescape_tsv(surface_key);
+    if surface_key.is_empty() {
+        return Err(CliError(format!("empty surface_key at line {line_number}")).into());
+    }
+    let qids = unescape_tsv(qids)
+        .split('|')
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_qid_number(value, line_number))
+        .collect::<Result<Vec<_>>>()?;
+    let qid_count = qid_count
+        .parse::<usize>()
+        .map_err(|err| CliError(format!("invalid qid_count at line {line_number}: {err}")))?;
+
+    Ok((surface_key, qids, qid_count))
+}
+
+fn parse_qid_number(value: &str, line_number: usize) -> Result<u32> {
+    let digits = value
+        .strip_prefix('Q')
+        .ok_or_else(|| CliError(format!("invalid QID `{value}` at line {line_number}")))?;
+    digits.parse::<u32>().map_err(|err| {
+        CliError(format!(
+            "QID `{value}` exceeds runtime u32 encoding at line {line_number}: {err}"
+        ))
+        .into()
+    })
+}
+
+fn copy_exact_bytes<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    bytes: u64,
+    label: &str,
+) -> Result<()> {
+    let copied = copy(&mut reader.take(bytes), writer)?;
+    if copied == bytes {
+        Ok(())
+    } else {
+        Err(CliError(format!("unexpected EOF while copying {label}")).into())
+    }
+}
+
+fn read_u32<R: Read>(reader: &mut R) -> Result<u32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u8<R: Read>(reader: &mut R) -> Result<u8> {
+    let mut bytes = [0u8; 1];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes[0])
+}
+
+fn write_u32<W: Write>(writer: &mut W, value: u32) -> Result<()> {
+    writer.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+fn postprocess_tmp_dir(out: &Path) -> PathBuf {
+    let file_name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("runtime");
+    out.with_file_name(format!("{file_name}.tmp"))
 }
 
 fn build_automaton_bytes(patterns: Vec<String>, mode: CompileMode) -> Result<Vec<u8>> {
@@ -1404,6 +1868,7 @@ fn print_help() {
     println!("  download    Download upstream Wikimedia dump files");
     println!("  preprocess  Extract surface_key -> QID[] rows from downloaded dumps");
     println!("  compile     Compile surface keys into an Aho-Corasick automaton");
+    println!("  postprocess Build JavaScript runtime tables from compiled data");
     println!();
     println!("Run `wikipage-spine-dataset-builder download --help` for download options.");
 }
@@ -1451,6 +1916,19 @@ fn print_compile_help() {
     println!("  --progress-every <n>         Progress interval (default: 100000)");
 }
 
+fn print_postprocess_help() {
+    println!("Usage:");
+    println!("  wikipage-spine-dataset-builder postprocess [options]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --preprocess <dir>           Preprocess directory (default: crates/data/preprocess)"
+    );
+    println!("  --compile <dir>              Compile directory (default: crates/data/compile)");
+    println!("  --out <dir>                  Output directory (default: crates/data/runtime)");
+    println!("  --progress-every <n>         Progress interval (default: 100000)");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,5 +1972,79 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(hits, vec![(0, 1, 2), (0, 2, 1), (1, 4, 0)]);
+    }
+
+    #[test]
+    fn postprocess_writes_runtime_qid_and_output_tables() {
+        let root = std::env::temp_dir().join(format!(
+            "wikipage-spine-postprocess-test-{}-{}",
+            std::process::id(),
+            generated_at_unix()
+        ));
+        let preprocess_dir = root.join("preprocess");
+        let compile_dir = root.join("compile");
+        let runtime_dir = root.join("runtime");
+        fs::create_dir_all(&preprocess_dir).unwrap();
+        fs::create_dir_all(&compile_dir).unwrap();
+
+        fs::write(
+            preprocess_dir.join("surface_qids.tsv"),
+            "surface_key\tqids\tqid_count\n北京\tQ956\t1\n北京大学\tQ13371|Q3918\t2\n大学\tQ3918\t1\n",
+        )
+        .unwrap();
+        let automaton = build_automaton_bytes(
+            vec![
+                "北京".to_string(),
+                "北京大学".to_string(),
+                "大学".to_string(),
+            ],
+            CompileMode::Charwise,
+        )
+        .unwrap();
+        fs::write(compile_dir.join("automaton.bin"), automaton).unwrap();
+
+        postprocess(PostprocessArgs {
+            preprocess: preprocess_dir,
+            compile: compile_dir,
+            out: runtime_dir.clone(),
+            progress_every: 1,
+        })
+        .unwrap();
+
+        let qid_index = fs::read(runtime_dir.join("qids/qid_index.bin")).unwrap();
+        assert_eq!(read_u32_at(&qid_index, 0), 0);
+        assert_eq!(read_u32_at(&qid_index, 4), 1);
+        assert_eq!(read_u32_at(&qid_index, 8), 1);
+        assert_eq!(read_u32_at(&qid_index, 12), 2);
+        assert_eq!(read_u32_at(&qid_index, 16), 3);
+        assert_eq!(read_u32_at(&qid_index, 20), 1);
+
+        let qid_values = fs::read(runtime_dir.join("qids/qid_values.bin")).unwrap();
+        let qid_values = qid_values
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(qid_values, vec![956, 13371, 3918, 3918]);
+
+        let state_outputs = fs::read(runtime_dir.join("automaton/state_outputs.bin")).unwrap();
+        let outputs = state_outputs
+            .chunks_exact(12)
+            .map(|chunk| {
+                (
+                    u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
+                    u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+                    u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(outputs.contains(&(0, 2, 0)));
+        assert!(outputs.iter().any(|&(id, len, _)| id == 1 && len == 4));
+        assert!(outputs.iter().any(|&(id, len, _)| id == 2 && len == 2));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 }
