@@ -20,6 +20,10 @@
 - TypeScript shared code 只承载 CLI 与 plugin 都需要理解的项目常量、协议类型和轻量逻辑。
 - Aho-Corasick 是数据集构建和可选运行后端的一部分，不是 Obsidian plugin 的直接职责。
 
+# 文档路由
+
+- 涉及数据集构建器的 `download`、`preprocess`、`compile`、`postprocess` 四步输入输出边界时，阅读 `docs/dataset-builder-pipeline.md`。
+
 # 文档原则
 
 - 文档入口是 AI 路由表。它的职责不是摘要下层文档，而是用问题域和触发条件把 AI 路由到合适的文档。
