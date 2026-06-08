@@ -5,6 +5,8 @@ dist/
 coverage/
 plugin-dist/
 target/
+crates/data/
+crates/out/
 packages/app/bin/*.map
 packages/app/plugin-dist/
 packages/app/coverage/
