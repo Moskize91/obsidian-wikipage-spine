@@ -17,7 +17,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_USER_AGENT: &str =
     "obsidian-wikipage-spine-dataset-builder/0.1 (+https://github.com/moskize91/obsidian-wikipage-spine)";
 const WIKIMEDIA_DUMPS_BASE: &str = "https://dumps.wikimedia.org";
-const DAACHORSE_MAX_PATTERNS: usize = (1 << 24) - 1;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -488,20 +487,6 @@ fn compile(args: CompileArgs) -> Result<()> {
                 break;
             }
         }
-        if patterns.len() >= DAACHORSE_MAX_PATTERNS {
-            write_compile_progress(
-                &progress_path,
-                "daachorse_pattern_limit_reached",
-                patterns.len(),
-                pattern_bytes,
-            )?;
-            return Err(CliError(format!(
-                "Daachorse supports at most {DAACHORSE_MAX_PATTERNS} patterns; stopped before surface_id={}",
-                patterns.len()
-            ))
-            .into());
-        }
-
         let Some(surface_key) = first_tsv_column(&line) else {
             return Err(CliError(format!(
                 "invalid surface_qids row without tab at line {}",

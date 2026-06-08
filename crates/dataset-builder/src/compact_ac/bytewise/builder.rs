@@ -6,7 +6,6 @@ use crate::compact_ac::bytewise::{
     BuildHelper, DoubleArrayAhoCorasick, MatchKind, State, DEAD_STATE_IDX, ROOT_STATE_IDX,
 };
 use crate::compact_ac::errors::{DaachorseError, Result};
-use crate::compact_ac::intpack::U24;
 use crate::compact_ac::nfa_builder::{NfaBuilder, DEAD_STATE_ID, ROOT_STATE_ID};
 use crate::compact_ac::utils::FromU32;
 
@@ -230,9 +229,6 @@ impl DoubleArrayAhoCorasickBuilder {
         let mut nfa = BytewiseNfaBuilder::new(self.match_kind);
         for (pattern, value) in patvals {
             nfa.add(pattern.as_ref(), value)?;
-        }
-        if nfa.len > usize::from_u32(U24::MAX) {
-            return Err(DaachorseError::automaton_scale("patvals.len()", U24::MAX));
         }
         let q = match self.match_kind {
             MatchKind::Standard => nfa.build_fails(),

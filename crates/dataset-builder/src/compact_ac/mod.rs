@@ -183,7 +183,6 @@ mod build_helper;
 pub mod bytewise;
 pub mod charwise;
 pub mod errors;
-mod intpack;
 mod nfa_builder;
 mod serializer;
 mod utils;

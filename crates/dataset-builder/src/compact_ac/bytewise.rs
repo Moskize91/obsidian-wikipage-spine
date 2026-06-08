@@ -15,7 +15,6 @@ use crate::compact_ac::bytewise::iter::{
     FindStepper, LeftmostFindIterator, U8SliceIterator,
 };
 use crate::compact_ac::errors::{DaachorseError, Result};
-use crate::compact_ac::intpack::{U24nU8, U24};
 use crate::compact_ac::serializer::{Serializable, SerializableVec};
 use crate::compact_ac::utils::FromU32;
 use crate::compact_ac::{MatchKind, Output};
@@ -45,10 +44,6 @@ const DEAD_STATE_IDX: u32 = 1;
 /// - [`DoubleArrayAhoCorasick::with_values`] builds an automaton from a set of pairs of a byte
 ///   string and a user-defined value.
 ///
-/// # Limitations
-///
-/// The maximum number of patterns is limited to 2^24-1. If a larger number of patterns is given,
-/// [`DaachorseError`] will be reported.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct DoubleArrayAhoCorasick<V> {
     states: Vec<State>,
@@ -1021,8 +1016,8 @@ impl<V> DoubleArrayAhoCorasick<V> {
 struct State {
     base: Option<NonZeroU32>,
     fail: u32,
-    // 3 bytes for output_pos and 1 byte for check.
-    opos_ch: U24nU8,
+    output_pos: Option<NonZeroU32>,
+    check: u32,
 }
 
 impl State {
@@ -1033,7 +1028,7 @@ impl State {
 
     #[inline(always)]
     pub fn check(&self) -> u8 {
-        self.opos_ch.b()
+        u8::try_from(self.check).unwrap()
     }
 
     #[inline(always)]
@@ -1043,7 +1038,7 @@ impl State {
 
     #[inline(always)]
     pub const fn output_pos(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.opos_ch.a().get())
+        self.output_pos
     }
 
     #[inline(always)]
@@ -1053,7 +1048,7 @@ impl State {
 
     #[inline(always)]
     pub fn set_check(&mut self, x: u8) {
-        self.opos_ch.set_b(x);
+        self.check = u32::from(x);
     }
 
     #[inline(always)]
@@ -1063,13 +1058,8 @@ impl State {
 
     #[inline(always)]
     pub fn set_output_pos(&mut self, x: Option<NonZeroU32>) -> Result<()> {
-        let x = x.map_or(0, NonZeroU32::get);
-        if let Ok(x) = U24::try_from(x) {
-            self.opos_ch.set_a(x);
-            Ok(())
-        } else {
-            Err(DaachorseError::automaton_scale("output_pos", U24::MAX))
-        }
+        self.output_pos = x;
+        Ok(())
     }
 }
 
@@ -1078,19 +1068,22 @@ impl Serializable for State {
     fn serialize_to_vec(&self, dst: &mut Vec<u8>) {
         self.base.serialize_to_vec(dst);
         self.fail.serialize_to_vec(dst);
-        self.opos_ch.serialize_to_vec(dst);
+        self.output_pos.serialize_to_vec(dst);
+        self.check.serialize_to_vec(dst);
     }
 
     #[inline(always)]
     fn deserialize_from_slice(src: &[u8]) -> Result<(Self, &[u8])> {
         let (base, src) = Option::<NonZeroU32>::deserialize_from_slice(src)?;
         let (fail, src) = u32::deserialize_from_slice(src)?;
-        let (opos_ch, src) = U24nU8::deserialize_from_slice(src)?;
+        let (output_pos, src) = Option::<NonZeroU32>::deserialize_from_slice(src)?;
+        let (check, src) = u32::deserialize_from_slice(src)?;
         Ok((
             Self {
                 base,
                 fail,
-                opos_ch,
+                output_pos,
+                check,
             },
             src,
         ))
@@ -1100,7 +1093,8 @@ impl Serializable for State {
     fn serialized_bytes() -> usize {
         Option::<NonZeroU32>::serialized_bytes()
             + u32::serialized_bytes()
-            + U24nU8::serialized_bytes()
+            + Option::<NonZeroU32>::serialized_bytes()
+            + u32::serialized_bytes()
     }
 }
 
@@ -1312,13 +1306,11 @@ mod tests {
 
     #[test]
     fn test_serialize_state() {
-        let mut opos_ch = U24nU8::default();
-        opos_ch.set_a(U24::try_from(57).unwrap());
-        opos_ch.set_b(77);
         let x = State {
             base: NonZeroU32::new(42),
             fail: 13,
-            opos_ch,
+            output_pos: NonZeroU32::new(0x0100_0000),
+            check: 77,
         };
         let mut data = vec![];
         x.serialize_to_vec(&mut data);
