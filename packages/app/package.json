@@ -4,7 +4,7 @@
   "description": "WikiPage Spine CLI and Obsidian plugin.",
   "main": "plugin-dist/main.js",
   "bin": {
-    "wikipage-spine": "bin/wikipage-spine.mjs"
+    "wikipage-spine": "bin/wikipage-spine.js"
   },
   "type": "commonjs",
   "scripts": {
@@ -13,6 +13,7 @@
     "build:cli": "tsup --config tsup.cli.config.ts",
     "prepare:plugin": "npm run build:plugin && cp manifest.json plugin-dist/manifest.json && if [ -f styles.css ]; then cp styles.css plugin-dist/styles.css; fi",
     "install:plugin": "npm run prepare:plugin && node scripts/install-plugin-dev.mjs",
+    "install:local": "npm run build && npm install -g .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",

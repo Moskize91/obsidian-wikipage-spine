@@ -27,7 +27,7 @@
 
 ## 2. Preprocess
 
-`preprocess` 负责把原始 dump 裁剪成项目自己的 surface 表。它把来自不同 wiki 的页面标题和重定向信息归并到同一套 surface 空间中。这个步骤产出的 `surface_qids.tsv` 是后续所有 `surface_id` 的来源。
+`preprocess` 负责把原始 dump 裁剪成项目自己的 surface 表，并为 surface 候选中出现过的 EID 抽取 Wikidata facts。它把来自不同 wiki 的页面标题和重定向信息归并到同一套 surface 空间中。这个步骤产出的 `surface_qids.tsv` 是后续所有 `surface_id` 的来源；`entity_facts.tsv` 是后处理生成 runtime EID 表的来源。
 
 输入：
 
@@ -39,12 +39,15 @@
 - `crates/data/preprocess/manifest.json`
 - `crates/data/preprocess/surface_qids.tsv`
 - `crates/data/preprocess/surface_sources.tsv`
+- `crates/data/preprocess/entity_facts.tsv`
 
 约束：
 
 - `surface_qids.tsv` 是后续编译和后处理共同依赖的主表。
 - `surface_qids.tsv` 的行顺序定义全局 `surface_id`，后续步骤必须保持这个顺序。
 - 中文和英文来源在此阶段被视为平等输入，不拆分为不同数据集。
+- `entity_facts.tsv` 只覆盖 `surface_qids.tsv` 中出现过的 QID；每个 QID 在该文件中最多出现一次。
+- 如果本地没有 Wikidata entities dump，该阶段仍会写出空 facts，以保持后处理输入格式稳定。
 
 ## 3. Compile
 
@@ -68,7 +71,7 @@
 
 ## 4. Postprocess
 
-`postprocess` 负责把编译产物和预处理主表整理成 JS/Obsidian 运行时可读取的数据包。它把 Rust 内部自动机格式拆成固定记录宽度的二进制表，并补齐运行时需要的 QID 映射表。这个步骤之后的 `runtime/` 才是面向下游安装和查询的产物。
+`postprocess` 负责把编译产物和预处理主表整理成 JS/Obsidian 运行时可读取的数据包。它把 Rust 内部自动机格式拆成固定记录宽度的二进制表，并补齐运行时需要的 surface 到 EID 映射表与 EID facts 表。这个步骤之后的 `runtime/` 才是面向下游安装和查询的产物。
 
 输入：
 
@@ -81,11 +84,16 @@
 - `crates/data/runtime/automaton/char_code_map.bin`
 - `crates/data/runtime/automaton/states.bin`
 - `crates/data/runtime/automaton/state_outputs.bin`
-- `crates/data/runtime/qids/qid_index.bin`
-- `crates/data/runtime/qids/qid_values.bin`
+- `crates/data/runtime/surfaces/surface_eid_index.bin`
+- `crates/data/runtime/surfaces/surface_eid_values.bin`
+- `crates/data/runtime/eids/qid_numbers.bin`
+- `crates/data/runtime/eids/flags.bin`
+- `crates/data/runtime/eids/predicate_index.bin`
+- `crates/data/runtime/eids/predicate_values.bin`
 
 约束：
 
 - 该步骤生成 JavaScript/Obsidian 运行时应读取的稳定二进制表。
 - runtime 产物必须能在低内存运行时中按需读取；cache 只能影响性能，不能影响正确性。
-- runtime 产物不包含 surface 文本本体，只保留匹配定位和 `surface_id -> QID[]` 所需的信息。
+- runtime 产物不包含 surface 文本本体，只保留匹配定位和 `surface_id -> eid_id[] -> QID/facts` 所需的信息。
+- 每个 QID 的 flags 和谓词只允许在 EID facts 表中出现一次；surface 候选表只能引用 `eid_id`。

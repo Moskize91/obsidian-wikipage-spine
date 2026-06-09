@@ -4,6 +4,7 @@ extern crate alloc;
 mod compact_ac;
 
 use crate::compact_ac::{CharwiseDoubleArrayAhoCorasickBuilder, DoubleArrayAhoCorasickBuilder};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
@@ -17,6 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_USER_AGENT: &str =
     "obsidian-wikipage-spine-dataset-builder/0.1 (+https://github.com/moskize91/obsidian-wikipage-spine)";
 const WIKIMEDIA_DUMPS_BASE: &str = "https://dumps.wikimedia.org";
+const ENTITY_FLAG_DISAMBIGUATION: u32 = 1;
+const WIKIDATA_DISAMBIGUATION_QID: u32 = 4_167_410;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -212,6 +215,12 @@ struct SurfaceRow {
     source: &'static str,
     page_id: u64,
     target_page_id: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EntityFact {
+    flags: u32,
+    predicates: Vec<(u32, u32)>,
 }
 
 fn parse_download_args(raw_args: Vec<String>) -> Result<DownloadArgs> {
@@ -507,8 +516,21 @@ fn preprocess(args: ProcessArgs) -> Result<()> {
         count_ambiguous_surfaces(&surface_qids)
     ));
 
+    let surface_qid_numbers = collect_surface_qid_numbers(&surface_qids)?;
+    eprintln!(
+        "processing Wikidata entity facts for {} QIDs",
+        surface_qid_numbers.len()
+    );
+    let entity_facts =
+        read_wikidata_entity_facts(&args.dumps, &args.date, &surface_qid_numbers, args.limit)?;
+
     write_surface_sources_tsv(&out_dir.join("surface_sources.tsv"), &all_surfaces)?;
     write_surface_qid_lists_tsv(&out_dir.join("surface_qids.tsv"), &surface_qids)?;
+    write_entity_facts_tsv(
+        &out_dir.join("entity_facts.tsv"),
+        &surface_qid_numbers,
+        &entity_facts,
+    )?;
     write_preprocess_manifest(&out_dir.join("manifest.json"), &args, &summaries)?;
 
     for summary in summaries {
@@ -630,8 +652,11 @@ fn compile(args: CompileArgs) -> Result<()> {
 #[derive(Debug)]
 struct RuntimeQidStats {
     surface_count: usize,
-    qid_value_count: usize,
+    surface_eid_value_count: usize,
+    eid_count: usize,
+    predicate_value_count: usize,
     max_qid: u32,
+    max_pid: u32,
 }
 
 #[derive(Debug)]
@@ -672,13 +697,20 @@ fn postprocess(args: PostprocessArgs) -> Result<()> {
     }
 
     let automaton_out_dir = tmp_dir.join("automaton");
-    let qids_out_dir = tmp_dir.join("qids");
+    let surfaces_out_dir = tmp_dir.join("surfaces");
+    let eids_out_dir = tmp_dir.join("eids");
     fs::create_dir_all(&automaton_out_dir)?;
-    fs::create_dir_all(&qids_out_dir)?;
+    fs::create_dir_all(&surfaces_out_dir)?;
+    fs::create_dir_all(&eids_out_dir)?;
 
-    eprintln!("postprocessing qid tables");
-    let (surface_utf16_lengths, qid_stats) =
-        write_runtime_qid_tables(&surface_qids_path, &qids_out_dir, args.progress_every)?;
+    eprintln!("postprocessing entity tables");
+    let (surface_utf16_lengths, qid_stats) = write_runtime_entity_tables(
+        &surface_qids_path,
+        &args.preprocess.join("entity_facts.tsv"),
+        &surfaces_out_dir,
+        &eids_out_dir,
+        args.progress_every,
+    )?;
 
     eprintln!("postprocessing automaton tables");
     let automaton_stats = write_runtime_automaton_tables(
@@ -710,40 +742,27 @@ fn postprocess(args: PostprocessArgs) -> Result<()> {
     Ok(())
 }
 
-fn write_runtime_qid_tables(
+fn write_runtime_entity_tables(
     surface_qids_path: &Path,
-    qids_out_dir: &Path,
+    entity_facts_path: &Path,
+    surfaces_out_dir: &Path,
+    eids_out_dir: &Path,
     progress_every: usize,
 ) -> Result<(Vec<u32>, RuntimeQidStats)> {
-    let mut qid_index = BufWriter::new(File::create(qids_out_dir.join("qid_index.bin"))?);
-    let mut qid_values = BufWriter::new(File::create(qids_out_dir.join("qid_values.bin"))?);
-    let input = File::open(surface_qids_path)?;
-    let reader = BufReader::new(input);
-
+    let entity_facts = read_entity_facts_tsv(entity_facts_path)?;
     let mut surface_utf16_lengths = Vec::<u32>::new();
-    let mut qid_value_count = 0usize;
-    let mut max_qid = 0u32;
+    let mut qid_set = HashSet::<u32>::new();
 
-    for (line_number, line) in reader.lines().enumerate() {
+    for (line_number, line) in BufReader::new(File::open(surface_qids_path)?)
+        .lines()
+        .enumerate()
+    {
         let line = line?;
         if line_number == 0 {
             validate_surface_qids_header(&line)?;
             continue;
         }
-
         let (surface_key, qids, qid_count) = parse_surface_qids_row(&line, line_number + 1)?;
-        let utf16_len = u32::try_from(surface_key.encode_utf16().count()).map_err(|_| {
-            CliError(format!(
-                "surface_key UTF-16 length overflow at line {}",
-                line_number + 1
-            ))
-        })?;
-        surface_utf16_lengths.push(utf16_len);
-
-        let offset = u32::try_from(qid_value_count)
-            .map_err(|_| CliError("qid value offset overflowed u32".to_string()))?;
-        let length = u32::try_from(qids.len())
-            .map_err(|_| CliError("qid list length overflowed u32".to_string()))?;
         if qids.len() != qid_count {
             return Err(CliError(format!(
                 "qid_count mismatch at line {}: parsed {}, declared {}",
@@ -753,32 +772,109 @@ fn write_runtime_qid_tables(
             ))
             .into());
         }
-        write_u32(&mut qid_index, offset)?;
-        write_u32(&mut qid_index, length)?;
+        let utf16_len = u32::try_from(surface_key.encode_utf16().count()).map_err(|_| {
+            CliError(format!(
+                "surface_key UTF-16 length overflow at line {}",
+                line_number + 1
+            ))
+        })?;
+        surface_utf16_lengths.push(utf16_len);
+        qid_set.extend(qids);
+    }
+
+    let mut qids = qid_set.into_iter().collect::<Vec<_>>();
+    qids.sort_unstable();
+    let qid_to_eid_id = qids
+        .iter()
+        .enumerate()
+        .map(|(index, qid)| (*qid, checked_surface_id(index)))
+        .collect::<HashMap<_, _>>();
+    let mut surface_eid_index = BufWriter::new(File::create(
+        surfaces_out_dir.join("surface_eid_index.bin"),
+    )?);
+    let mut surface_eid_values = BufWriter::new(File::create(
+        surfaces_out_dir.join("surface_eid_values.bin"),
+    )?);
+
+    let mut surface_eid_value_count = 0usize;
+    for (line_number, line) in BufReader::new(File::open(surface_qids_path)?)
+        .lines()
+        .enumerate()
+    {
+        let line = line?;
+        if line_number == 0 {
+            validate_surface_qids_header(&line)?;
+            continue;
+        }
+        let (_surface_key, qids, _qid_count) = parse_surface_qids_row(&line, line_number + 1)?;
+        let offset = u32::try_from(surface_eid_value_count)
+            .map_err(|_| CliError("surface EID value offset overflowed u32".to_string()))?;
+        let length = u32::try_from(qids.len())
+            .map_err(|_| CliError("surface EID list length overflowed u32".to_string()))?;
+        write_u32(&mut surface_eid_index, offset)?;
+        write_u32(&mut surface_eid_index, length)?;
         for qid in qids {
-            max_qid = max_qid.max(qid);
-            write_u32(&mut qid_values, qid)?;
-            qid_value_count += 1;
+            let eid_id = qid_to_eid_id.get(&qid).copied().ok_or_else(|| {
+                CliError(format!("surface row references unknown QID number {qid}"))
+            })?;
+            write_u32(&mut surface_eid_values, eid_id)?;
+            surface_eid_value_count += 1;
         }
 
-        let surface_count = surface_utf16_lengths.len();
+        let surface_count = line_number;
         if surface_count % progress_every == 0 {
             eprintln!(
-                "postprocessed qids surface_id={} surfaces={} qid_values={}",
+                "postprocessed surface EIDs surface_id={} surfaces={} surface_eid_values={}",
                 surface_count - 1,
                 surface_count,
-                qid_value_count
+                surface_eid_value_count
             );
         }
     }
+    surface_eid_index.flush()?;
+    surface_eid_values.flush()?;
 
-    qid_index.flush()?;
-    qid_values.flush()?;
+    let mut qid_numbers = BufWriter::new(File::create(eids_out_dir.join("qid_numbers.bin"))?);
+    let mut flags = BufWriter::new(File::create(eids_out_dir.join("flags.bin"))?);
+    let mut predicate_index =
+        BufWriter::new(File::create(eids_out_dir.join("predicate_index.bin"))?);
+    let mut predicate_values =
+        BufWriter::new(File::create(eids_out_dir.join("predicate_values.bin"))?);
+
+    let mut predicate_value_count = 0usize;
+    let mut max_qid = 0u32;
+    let mut max_pid = 0u32;
+    for qid in &qids {
+        max_qid = max_qid.max(*qid);
+        let fact = entity_facts.get(qid).cloned().unwrap_or_default();
+        write_u32(&mut qid_numbers, *qid)?;
+        write_u32(&mut flags, fact.flags)?;
+        let offset = u32::try_from(predicate_value_count)
+            .map_err(|_| CliError("predicate value offset overflowed u32".to_string()))?;
+        let length = u32::try_from(fact.predicates.len())
+            .map_err(|_| CliError("predicate list length overflowed u32".to_string()))?;
+        write_u32(&mut predicate_index, offset)?;
+        write_u32(&mut predicate_index, length)?;
+        for (pid, value_qid) in fact.predicates {
+            max_pid = max_pid.max(pid);
+            max_qid = max_qid.max(value_qid);
+            write_u32(&mut predicate_values, pid)?;
+            write_u32(&mut predicate_values, value_qid)?;
+            predicate_value_count += 1;
+        }
+    }
+    qid_numbers.flush()?;
+    flags.flush()?;
+    predicate_index.flush()?;
+    predicate_values.flush()?;
 
     let stats = RuntimeQidStats {
         surface_count: surface_utf16_lengths.len(),
-        qid_value_count,
+        surface_eid_value_count,
+        eid_count: qids.len(),
+        predicate_value_count,
         max_qid,
+        max_pid,
     };
     Ok((surface_utf16_lengths, stats))
 }
@@ -900,7 +996,9 @@ fn write_runtime_manifest(
     writeln!(file, "  \"match_kind\": {},", automaton_stats.match_kind)?;
     writeln!(file, "  \"state_record_bytes\": 16,")?;
     writeln!(file, "  \"state_output_record_bytes\": 12,")?;
-    writeln!(file, "  \"qid_index_record_bytes\": 8,")?;
+    writeln!(file, "  \"surface_eid_index_record_bytes\": 8,")?;
+    writeln!(file, "  \"eid_predicate_index_record_bytes\": 8,")?;
+    writeln!(file, "  \"eid_predicate_value_record_bytes\": 8,")?;
     writeln!(file, "  \"states_len\": {},", automaton_stats.states_len)?;
     writeln!(file, "  \"num_states\": {},", automaton_stats.num_states)?;
     writeln!(
@@ -921,10 +1019,17 @@ fn write_runtime_manifest(
     )?;
     writeln!(
         file,
-        "  \"qid_value_count\": {},",
-        qid_stats.qid_value_count
+        "  \"surface_eid_value_count\": {},",
+        qid_stats.surface_eid_value_count
+    )?;
+    writeln!(file, "  \"eid_count\": {},", qid_stats.eid_count)?;
+    writeln!(
+        file,
+        "  \"eid_predicate_value_count\": {},",
+        qid_stats.predicate_value_count
     )?;
     writeln!(file, "  \"max_qid\": {},", qid_stats.max_qid)?;
+    writeln!(file, "  \"max_pid\": {},", qid_stats.max_pid)?;
     writeln!(
         file,
         "  \"source_automaton_bytes\": {},",
@@ -940,8 +1045,24 @@ fn write_runtime_manifest(
         file,
         "    \"state_outputs\": \"automaton/state_outputs.bin\","
     )?;
-    writeln!(file, "    \"qid_index\": \"qids/qid_index.bin\",")?;
-    writeln!(file, "    \"qid_values\": \"qids/qid_values.bin\"")?;
+    writeln!(
+        file,
+        "    \"surface_eid_index\": \"surfaces/surface_eid_index.bin\","
+    )?;
+    writeln!(
+        file,
+        "    \"surface_eid_values\": \"surfaces/surface_eid_values.bin\","
+    )?;
+    writeln!(file, "    \"eid_qid_numbers\": \"eids/qid_numbers.bin\",")?;
+    writeln!(file, "    \"eid_flags\": \"eids/flags.bin\",")?;
+    writeln!(
+        file,
+        "    \"eid_predicate_index\": \"eids/predicate_index.bin\","
+    )?;
+    writeln!(
+        file,
+        "    \"eid_predicate_values\": \"eids/predicate_values.bin\""
+    )?;
     writeln!(file, "  }}")?;
     writeln!(file, "}}")?;
     Ok(())
@@ -973,6 +1094,95 @@ fn parse_surface_qids_row(line: &str, line_number: usize) -> Result<(String, Vec
         .map_err(|err| CliError(format!("invalid qid_count at line {line_number}: {err}")))?;
 
     Ok((surface_key, qids, qid_count))
+}
+
+fn read_entity_facts_tsv(path: &Path) -> Result<HashMap<u32, EntityFact>> {
+    let mut facts = HashMap::new();
+    if !path.exists() {
+        eprintln!(
+            "missing preprocess file {}; using empty entity facts",
+            path.display()
+        );
+        return Ok(facts);
+    }
+    for (line_number, line) in BufReader::new(File::open(path)?).lines().enumerate() {
+        let line = line?;
+        if line_number == 0 {
+            validate_entity_facts_header(&line)?;
+            continue;
+        }
+        let (qid, fact) = parse_entity_facts_row(&line, line_number + 1)?;
+        facts.insert(qid, fact);
+    }
+    Ok(facts)
+}
+
+fn parse_entity_facts_row(line: &str, line_number: usize) -> Result<(u32, EntityFact)> {
+    let mut parts = line.splitn(4, '\t');
+    let qid = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing qid at line {line_number}")))?;
+    let flags = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing flags at line {line_number}")))?;
+    let predicate_pairs = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing predicate_pairs at line {line_number}")))?;
+    let predicate_count = parts
+        .next()
+        .ok_or_else(|| CliError(format!("missing predicate_count at line {line_number}")))?;
+
+    let qid = parse_qid_number(qid, line_number)?;
+    let flags = flags
+        .parse::<u32>()
+        .map_err(|err| CliError(format!("invalid flags at line {line_number}: {err}")))?;
+    let predicate_count = predicate_count.parse::<usize>().map_err(|err| {
+        CliError(format!(
+            "invalid predicate_count at line {line_number}: {err}"
+        ))
+    })?;
+    let predicates = parse_predicate_pairs(&unescape_tsv(predicate_pairs), line_number)?;
+    if predicates.len() != predicate_count {
+        return Err(CliError(format!(
+            "predicate_count mismatch at line {}: parsed {}, declared {}",
+            line_number,
+            predicates.len(),
+            predicate_count
+        ))
+        .into());
+    }
+    Ok((qid, EntityFact { flags, predicates }))
+}
+
+fn parse_predicate_pairs(value: &str, line_number: usize) -> Result<Vec<(u32, u32)>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|pair| {
+            let (pid, value_qid) = pair.split_once('=').ok_or_else(|| {
+                CliError(format!(
+                    "invalid predicate pair `{pair}` at line {line_number}"
+                ))
+            })?;
+            let pid = pid
+                .strip_prefix('P')
+                .ok_or_else(|| CliError(format!("invalid PID `{pid}` at line {line_number}")))?
+                .parse::<u32>()
+                .map_err(|err| {
+                    CliError(format!(
+                        "PID `{pid}` exceeds runtime u32 encoding at line {line_number}: {err}"
+                    ))
+                })?;
+            let value_qid = if value_qid.is_empty() {
+                0
+            } else {
+                parse_qid_number(value_qid, line_number)?
+            };
+            Ok((pid, value_qid))
+        })
+        .collect::<Result<Vec<_>>>()
 }
 
 fn parse_qid_number(value: &str, line_number: usize) -> Result<u32> {
@@ -1073,6 +1283,14 @@ fn validate_surface_qids_header(line: &str) -> Result<()> {
     }
 }
 
+fn validate_entity_facts_header(line: &str) -> Result<()> {
+    if line == "qid\tflags\tpredicate_pairs\tpredicate_count" {
+        Ok(())
+    } else {
+        Err(CliError(format!("unexpected entity_facts.tsv header: {line}")).into())
+    }
+}
+
 fn first_tsv_column(line: &str) -> Option<&str> {
     line.split_once('\t').map(|(first, _rest)| first)
 }
@@ -1169,6 +1387,15 @@ fn dump_path(dumps: &Path, wiki: &str, date: &str, component: &str) -> PathBuf {
         .join(wiki)
         .join(date)
         .join(format!("{wiki}-{date}-{component}.sql.gz"))
+}
+
+fn wikidata_entities_dump_path(dumps: &Path, date: &str) -> PathBuf {
+    let file_name = if date == "latest" {
+        "latest-all.json.bz2".to_string()
+    } else {
+        format!("wikidata-{date}-all.json.bz2")
+    };
+    dumps.join("wikidatawiki").join(date).join(file_name)
 }
 
 fn read_pages(path: &Path, limit: Option<usize>) -> Result<HashMap<u64, Page>> {
@@ -1342,11 +1569,135 @@ fn build_surface_qid_lists(rows: &[SurfaceRow]) -> Vec<(String, Vec<String>)> {
     result
 }
 
+fn collect_surface_qid_numbers(rows: &[(String, Vec<String>)]) -> Result<HashSet<u32>> {
+    let mut qids = HashSet::new();
+    for (_surface_key, surface_qids) in rows {
+        for qid in surface_qids {
+            qids.insert(parse_qid_number(qid, 0)?);
+        }
+    }
+    Ok(qids)
+}
+
 fn count_ambiguous_surfaces(surface_qids: &[(String, Vec<String>)]) -> usize {
     surface_qids
         .iter()
         .filter(|(_surface_key, qids)| qids.len() > 1)
         .count()
+}
+
+fn read_wikidata_entity_facts(
+    dumps: &Path,
+    date: &str,
+    qids: &HashSet<u32>,
+    limit: Option<usize>,
+) -> Result<HashMap<u32, EntityFact>> {
+    let mut facts = qids
+        .iter()
+        .copied()
+        .map(|qid| (qid, EntityFact::default()))
+        .collect::<HashMap<_, _>>();
+    let path = wikidata_entities_dump_path(dumps, date);
+    if !path.exists() {
+        eprintln!(
+            "missing Wikidata entities dump {}; writing empty entity facts",
+            path.display()
+        );
+        return Ok(facts);
+    }
+
+    let mut handled = 0usize;
+    let reader = open_wikidata_entities_reader(&path)?;
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim().trim_end_matches(',');
+        if line.is_empty() || line == "[" || line == "]" {
+            continue;
+        }
+        let entity = serde_json::from_str::<Value>(line)?;
+        let Some(qid) = entity
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(qid_number_from_str)
+        else {
+            continue;
+        };
+        if !qids.contains(&qid) {
+            continue;
+        }
+        let fact = extract_entity_fact(&entity);
+        facts.insert(qid, fact);
+        handled += 1;
+        if let Some(limit) = limit {
+            if handled >= limit {
+                break;
+            }
+        }
+    }
+    Ok(facts)
+}
+
+fn open_wikidata_entities_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("bz2") {
+        let mut child = Command::new("bzip2")
+            .arg("-dc")
+            .arg(path)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CliError("failed to read bzip2 stdout".to_string()))?;
+        return Ok(Box::new(BufReader::new(stdout)));
+    }
+    Ok(Box::new(BufReader::new(File::open(path)?)))
+}
+
+fn extract_entity_fact(entity: &Value) -> EntityFact {
+    let mut predicates = HashSet::<(u32, u32)>::new();
+    if let Some(claims) = entity.get("claims").and_then(Value::as_object) {
+        for (pid, claims) in claims {
+            let Some(pid) = pid_number_from_str(pid) else {
+                continue;
+            };
+            let Some(claims) = claims.as_array() else {
+                continue;
+            };
+            for claim in claims {
+                let value_qid = claim_value_qid(claim).unwrap_or(0);
+                predicates.insert((pid, value_qid));
+            }
+        }
+    }
+    let mut predicates = predicates.into_iter().collect::<Vec<_>>();
+    predicates.sort_unstable();
+    let flags = if predicates
+        .iter()
+        .any(|&(pid, value_qid)| pid == 31 && value_qid == WIKIDATA_DISAMBIGUATION_QID)
+    {
+        ENTITY_FLAG_DISAMBIGUATION
+    } else {
+        0
+    };
+    EntityFact { flags, predicates }
+}
+
+fn claim_value_qid(claim: &Value) -> Option<u32> {
+    claim
+        .get("mainsnak")?
+        .get("datavalue")?
+        .get("value")?
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(qid_number_from_str)
+}
+
+fn qid_number_from_str(value: &str) -> Option<u32> {
+    value.strip_prefix('Q')?.parse::<u32>().ok()
+}
+
+fn pid_number_from_str(value: &str) -> Option<u32> {
+    value.strip_prefix('P')?.parse::<u32>().ok()
 }
 
 fn for_insert_values<F>(
@@ -1577,6 +1928,39 @@ fn write_surface_qid_lists_tsv(path: &Path, rows: &[(String, Vec<String>)]) -> R
     Ok(())
 }
 
+fn write_entity_facts_tsv(
+    path: &Path,
+    qids: &HashSet<u32>,
+    facts: &HashMap<u32, EntityFact>,
+) -> Result<()> {
+    let mut file = File::create(path)?;
+    let mut qids = qids.iter().copied().collect::<Vec<_>>();
+    qids.sort_unstable();
+    writeln!(file, "qid\tflags\tpredicate_pairs\tpredicate_count")?;
+    for qid in qids {
+        let fact = facts.get(&qid).cloned().unwrap_or_default();
+        let pairs = fact
+            .predicates
+            .iter()
+            .map(|(pid, value_qid)| {
+                if *value_qid == 0 {
+                    format!("P{pid}=")
+                } else {
+                    format!("P{pid}=Q{value_qid}")
+                }
+            })
+            .collect::<Vec<_>>();
+        writeln!(
+            file,
+            "Q{qid}\t{}\t{}\t{}",
+            fact.flags,
+            escape_tsv(&pairs.join("|")),
+            pairs.len()
+        )?;
+    }
+    Ok(())
+}
+
 fn write_preprocess_manifest(path: &Path, args: &ProcessArgs, summaries: &[String]) -> Result<()> {
     let mut file = File::create(path)?;
     writeln!(file, "{{")?;
@@ -1604,7 +1988,8 @@ fn write_preprocess_manifest(path: &Path, args: &ProcessArgs, summaries: &[Strin
     writeln!(file, "  ],")?;
     writeln!(file, "  \"files\": [")?;
     writeln!(file, "    \"surface_qids.tsv\",")?;
-    writeln!(file, "    \"surface_sources.tsv\"")?;
+    writeln!(file, "    \"surface_sources.tsv\",")?;
+    writeln!(file, "    \"entity_facts.tsv\"")?;
     writeln!(file, "  ],")?;
     writeln!(file, "  \"summaries\": [")?;
     for (index, summary) in summaries.iter().enumerate() {
@@ -1975,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn postprocess_writes_runtime_qid_and_output_tables() {
+    fn postprocess_writes_runtime_entity_and_output_tables() {
         let root = std::env::temp_dir().join(format!(
             "wikipage-spine-postprocess-test-{}-{}",
             std::process::id(),
@@ -1990,6 +2375,11 @@ mod tests {
         fs::write(
             preprocess_dir.join("surface_qids.tsv"),
             "surface_key\tqids\tqid_count\n北京\tQ956\t1\n北京大学\tQ13371|Q3918\t2\n大学\tQ3918\t1\n",
+        )
+        .unwrap();
+        fs::write(
+            preprocess_dir.join("entity_facts.tsv"),
+            "qid\tflags\tpredicate_pairs\tpredicate_count\nQ956\t0\tP31=Q515|P17=Q148\t2\nQ3918\t0\tP31=Q875538\t1\nQ13371\t1\tP31=Q4167410\t1\n",
         )
         .unwrap();
         let automaton = build_automaton_bytes(
@@ -2011,20 +2401,42 @@ mod tests {
         })
         .unwrap();
 
-        let qid_index = fs::read(runtime_dir.join("qids/qid_index.bin")).unwrap();
-        assert_eq!(read_u32_at(&qid_index, 0), 0);
-        assert_eq!(read_u32_at(&qid_index, 4), 1);
-        assert_eq!(read_u32_at(&qid_index, 8), 1);
-        assert_eq!(read_u32_at(&qid_index, 12), 2);
-        assert_eq!(read_u32_at(&qid_index, 16), 3);
-        assert_eq!(read_u32_at(&qid_index, 20), 1);
+        let surface_eid_index =
+            fs::read(runtime_dir.join("surfaces/surface_eid_index.bin")).unwrap();
+        assert_eq!(read_u32_at(&surface_eid_index, 0), 0);
+        assert_eq!(read_u32_at(&surface_eid_index, 4), 1);
+        assert_eq!(read_u32_at(&surface_eid_index, 8), 1);
+        assert_eq!(read_u32_at(&surface_eid_index, 12), 2);
+        assert_eq!(read_u32_at(&surface_eid_index, 16), 3);
+        assert_eq!(read_u32_at(&surface_eid_index, 20), 1);
 
-        let qid_values = fs::read(runtime_dir.join("qids/qid_values.bin")).unwrap();
-        let qid_values = qid_values
+        let surface_eid_values =
+            fs::read(runtime_dir.join("surfaces/surface_eid_values.bin")).unwrap();
+        let surface_eid_values = surface_eid_values
             .chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(qid_values, vec![956, 13371, 3918, 3918]);
+        assert_eq!(surface_eid_values, vec![0, 2, 1, 1]);
+
+        let eid_qids = fs::read(runtime_dir.join("eids/qid_numbers.bin")).unwrap();
+        let eid_qids = eid_qids
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(eid_qids, vec![956, 3918, 13371]);
+
+        let eid_flags = fs::read(runtime_dir.join("eids/flags.bin")).unwrap();
+        assert_eq!(read_u32_at(&eid_flags, 0), 0);
+        assert_eq!(read_u32_at(&eid_flags, 4), 0);
+        assert_eq!(read_u32_at(&eid_flags, 8), ENTITY_FLAG_DISAMBIGUATION);
+
+        let predicate_index = fs::read(runtime_dir.join("eids/predicate_index.bin")).unwrap();
+        assert_eq!(read_u32_at(&predicate_index, 0), 0);
+        assert_eq!(read_u32_at(&predicate_index, 4), 2);
+        assert_eq!(read_u32_at(&predicate_index, 8), 2);
+        assert_eq!(read_u32_at(&predicate_index, 12), 1);
+        assert_eq!(read_u32_at(&predicate_index, 16), 3);
+        assert_eq!(read_u32_at(&predicate_index, 20), 1);
 
         let state_outputs = fs::read(runtime_dir.join("automaton/state_outputs.bin")).unwrap();
         let outputs = state_outputs

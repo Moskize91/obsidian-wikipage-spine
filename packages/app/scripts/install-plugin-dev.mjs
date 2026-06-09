@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 async function loadEnvFile(filePath) {
   try {
@@ -51,12 +52,17 @@ async function cleanTarget(target) {
   }
 }
 
-await loadEnvFile(path.resolve(".env.local"));
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const packageRoot = path.resolve(scriptDir, "..");
+const repoRoot = path.resolve(packageRoot, "../..");
 
-const vault = process.env.OBSIDIAN_DEV_VAULT;
+await loadEnvFile(path.join(repoRoot, ".env.local"));
+await loadEnvFile(path.join(packageRoot, ".env.local"));
+
+const vault = process.env.VAULT;
 const pluginId = process.env.OBSIDIAN_PLUGIN_ID ?? "wikipage-spine";
 if (!vault) {
-  throw new Error("Missing OBSIDIAN_DEV_VAULT.");
+  throw new Error("Missing VAULT.");
 }
 
 const target = path.join(vault, ".obsidian", "plugins", pluginId);

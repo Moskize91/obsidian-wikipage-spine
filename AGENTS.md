@@ -23,6 +23,8 @@
 # 文档路由
 
 - 涉及数据集构建器的 `download`、`preprocess`、`compile`、`postprocess` 四步输入输出边界时，阅读 `docs/dataset-builder-pipeline.md`。
+- 涉及 TypeScript model 层、SQLite schema、note/entity/view 边界、扫描状态和 entity metadata 约束时，阅读 `docs/model-layer.md`。
+- 涉及 Wikidata 谓词或 entity 类型的召回评分草案时，阅读 `docs/entity-capture-score-draft.json`。
 
 # 文档原则
 
