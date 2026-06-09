@@ -214,7 +214,8 @@ export class ModelStore {
 
       if (conflict.matches.length > 0) {
         statements.push(
-          `INSERT INTO note_mention_conflict_matches (
+          `WITH new_conflict(id) AS (SELECT last_insert_rowid())
+          INSERT INTO note_mention_conflict_matches (
             conflict_id, resolved_entity_id, resolved_eid, text, surface_id,
             surface, source_start, source_end, candidate_eids_json
           ) ${conflict.matches
@@ -225,7 +226,7 @@ export class ModelStore {
                   : entities.get(match.resolvedEid);
               const prefix = index === 0 ? "SELECT" : "UNION ALL SELECT";
               return `${prefix}
-                last_insert_rowid(),
+                new_conflict.id,
                 ${sqlValue(resolvedEntity?.id)},
                 ${sqlValue(match.resolvedEid)},
                 ${sqlValue(match.text)},
@@ -233,7 +234,8 @@ export class ModelStore {
                 ${sqlValue(match.surface)},
                 ${sqlValue(match.sourceStart)},
                 ${sqlValue(match.sourceEnd)},
-                ${sqlValue(JSON.stringify(match.eids))}`;
+                ${sqlValue(JSON.stringify(match.eids))}
+                FROM new_conflict`;
             })
             .join("\n")}`,
         );
@@ -387,8 +389,9 @@ function runSqlite(
   extraArgs: readonly string[] = [],
 ): string {
   try {
-    return execFileSync("sqlite3", [...extraArgs, dbPath, sqlText], {
+    return execFileSync("sqlite3", [...extraArgs, dbPath], {
       encoding: "utf8",
+      input: sqlText,
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (error: unknown) {

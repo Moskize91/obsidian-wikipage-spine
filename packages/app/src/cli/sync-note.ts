@@ -46,13 +46,21 @@ export function syncNote(input: SyncNoteInput): SyncNoteResult {
   if (!existsSync(notePath.absolutePath)) {
     throw new Error(`Note does not exist: ${notePath.viewPath}`);
   }
+  if (isInsideEntityDir(notePath.viewPath, context.settings.entityDir)) {
+    throw new Error(`sync-note only accepts user note views: ${notePath.viewPath}`);
+  }
+  if (!context.settings.runtimeDir) {
+    throw new Error(
+      "Runtime dataset is not configured. Set runtimeDir in the WikiPage Spine plugin settings.",
+    );
+  }
   const runtimeDir = resolveConfiguredPath(
     context.vaultDir,
     context.settings.runtimeDir,
   );
-  if (!context.settings.runtimeDir || !SurfaceMatcher.exists(runtimeDir)) {
+  if (!SurfaceMatcher.exists(runtimeDir)) {
     throw new Error(
-      `Runtime dataset is not configured or missing manifest.json: ${runtimeDir}`,
+      `Runtime dataset manifest.json is missing: ${runtimeDir}`,
     );
   }
 
@@ -207,6 +215,14 @@ function entityViewPathFromLinkTarget(
     return undefined;
   }
   return rest.endsWith(".md") ? normalized : `${normalized}.md`;
+}
+
+function isInsideEntityDir(viewPath: string, entityDir: string): boolean {
+  const normalizedDir = entityDir.replace(/\/+$/g, "");
+  if (!normalizedDir) {
+    return false;
+  }
+  return viewPath === normalizedDir || viewPath.startsWith(`${normalizedDir}/`);
 }
 
 function normalizeObsidianLinkTarget(target: string): string {

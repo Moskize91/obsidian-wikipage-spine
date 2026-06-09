@@ -30,12 +30,23 @@ export function renderNoteView(
   let consumedSourceEnd = -1;
 
   for (const token of tokens) {
+    let current = replacements[replacementIndex];
+    while (current !== undefined && current.sourceEnd <= token.sourceStart) {
+      replacementIndex += 1;
+      current = replacements[replacementIndex];
+    }
+
     if (token.sourceEnd <= consumedSourceEnd) {
       continue;
     }
 
     if (token.kind === "special") {
       output += token.raw;
+      current = replacements[replacementIndex];
+      while (current !== undefined && current.sourceStart < token.sourceEnd) {
+        replacementIndex += 1;
+        current = replacements[replacementIndex];
+      }
       if (token.syntax === "thematic_break") {
         seenEids.clear();
       }

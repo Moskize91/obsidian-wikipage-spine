@@ -137,6 +137,42 @@ describe("note view renderer", () => {
       ),
     ).toBe("[[wiki/北京大学|北京大学]]");
   });
+
+  it("does not apply stale replacements inside protected table syntax", () => {
+    const markdown = "|年代|节点|\n|---|---|\n|418|迦太基会议|\n北京大学";
+    const start = markdown.indexOf("北京大学");
+
+    expect(
+      renderNoteView(
+        markdown,
+        {
+          resolved: [
+            resolvedMention(1, 3, "年代", "Q956"),
+            resolvedMention(start, start + 4, "北京大学", "Q3918"),
+          ],
+          conflicts: [],
+        },
+        renderOptions,
+      ),
+    ).toBe("|年代|节点|\n|---|---|\n|418|迦太基会议|\n[[wiki/北京大学|北京大学]]");
+  });
+
+  it("does not apply stale replacements to markdown emphasis markers", () => {
+    expect(
+      renderNoteView(
+        "**北京大学** 北京大学",
+        {
+          resolved: [
+            resolvedMention(0, 2, "**", "Q956"),
+            resolvedMention(2, 6, "北京大学", "Q3918"),
+            resolvedMention(9, 13, "北京大学", "Q3918"),
+          ],
+          conflicts: [],
+        },
+        renderOptions,
+      ),
+    ).toBe("**[[wiki/北京大学|北京大学]]** 北京大学");
+  });
 });
 
 function resolvedMention(

@@ -130,6 +130,18 @@ function normalizeObsidianView(markdown, options) {
     }
   }
   while (index < markdown.length) {
+    const blockquote = readBlockquote(markdown, index);
+    if (blockquote !== void 0) {
+      pushSpecial(tokens, "blockquote", markdown, index, blockquote);
+      index = blockquote;
+      continue;
+    }
+    const markdownTable = readMarkdownTable(markdown, index);
+    if (markdownTable !== void 0) {
+      pushSpecial(tokens, "markdown_table", markdown, index, markdownTable);
+      index = markdownTable;
+      continue;
+    }
     const thematicBreak = readThematicBreak(markdown, index);
     if (thematicBreak !== void 0) {
       pushSpecial(tokens, "thematic_break", markdown, index, thematicBreak);
@@ -200,10 +212,40 @@ function normalizeObsidianView(markdown, options) {
       index = markdownLink.end;
       continue;
     }
+    const footnoteDefinition = readFootnoteDefinition(markdown, index);
+    if (footnoteDefinition !== void 0) {
+      pushSpecial(tokens, "footnote_def", markdown, index, footnoteDefinition);
+      index = footnoteDefinition;
+      continue;
+    }
+    const footnoteReference = readFootnoteReference(markdown, index);
+    if (footnoteReference !== void 0) {
+      pushSpecial(tokens, "footnote_ref", markdown, index, footnoteReference);
+      index = footnoteReference;
+      continue;
+    }
     const inlineCode = readInlineCode(markdown, index);
     if (inlineCode !== void 0) {
       pushSpecial(tokens, "inline_code", markdown, index, inlineCode);
       index = inlineCode;
+      continue;
+    }
+    const emphasisMarker = readMarkdownEmphasisMarker(markdown, index);
+    if (emphasisMarker !== void 0) {
+      pushSpecial(
+        tokens,
+        "markdown_emphasis",
+        markdown,
+        index,
+        emphasisMarker
+      );
+      index = emphasisMarker;
+      continue;
+    }
+    const obsidianTag = readObsidianTag(markdown, index);
+    if (obsidianTag !== void 0) {
+      pushSpecial(tokens, "obsidian_tag", markdown, index, obsidianTag);
+      index = obsidianTag;
       continue;
     }
     const char = readCodePoint(markdown, index);
@@ -258,12 +300,145 @@ function isThematicBreakLine(line) {
   const match = /^ {0,3}([*\-_])(?:[ \t]*\1){2,}[ \t]*$/.exec(line);
   return match !== null;
 }
+function readBlockquote(text, index) {
+  if (!isLineStart(text, index) || !/^ {0,3}>/.test(text.slice(index))) {
+    return void 0;
+  }
+  let end = index;
+  let cursor = index;
+  while (cursor < text.length) {
+    const line = readLine(text, cursor);
+    if (line === void 0 || !/^ {0,3}>/.test(line.content)) {
+      break;
+    }
+    end = line.end;
+    cursor = line.end;
+  }
+  return end;
+}
+function readMarkdownTable(text, index) {
+  if (!isLineStart(text, index)) {
+    return void 0;
+  }
+  const header = readLine(text, index);
+  if (header === void 0) {
+    return void 0;
+  }
+  if (!isTableContentLine(header.content)) {
+    return void 0;
+  }
+  const delimiter = readLine(text, header.end);
+  if (delimiter === void 0 || !isTableDelimiterLine(delimiter.content)) {
+    return void 0;
+  }
+  let end = delimiter.end;
+  let cursor = delimiter.end;
+  while (cursor < text.length) {
+    const row = readLine(text, cursor);
+    if (row === void 0 || !isTableContentLine(row.content)) {
+      break;
+    }
+    end = row.end;
+    cursor = row.end;
+  }
+  return end;
+}
+function readFootnoteDefinition(text, index) {
+  if (!isLineStart(text, index)) {
+    return void 0;
+  }
+  const match = /^ {0,3}\[\^[^\]\r\n]+\]:[ \t]*/.exec(text.slice(index));
+  return match === null ? void 0 : index + match[0].length;
+}
+function readFootnoteReference(text, index) {
+  const match = /^\[\^[^\]\r\n]+\]/.exec(text.slice(index));
+  return match === null ? void 0 : index + match[0].length;
+}
+function readMarkdownEmphasisMarker(text, index) {
+  const char = text[index];
+  if (char !== "*" && char !== "_") {
+    return void 0;
+  }
+  let end = index;
+  while (text[end] === char && end - index < 3) {
+    end += 1;
+  }
+  return end;
+}
+function readObsidianTag(text, index) {
+  if (text[index] !== "#" || !isTagBoundaryBefore(text, index)) {
+    return void 0;
+  }
+  let end = index + 1;
+  while (end < text.length && isObsidianTagChar(text[end] ?? "")) {
+    end += 1;
+  }
+  if (end === index + 1) {
+    return void 0;
+  }
+  const body = text.slice(index + 1, end);
+  if (!/[^\d/]/u.test(body)) {
+    return void 0;
+  }
+  return end;
+}
 function readCodePoint(text, index) {
   const codePoint = text.codePointAt(index);
   if (codePoint === void 0) {
     return "";
   }
   return String.fromCodePoint(codePoint);
+}
+function isLineStart(text, index) {
+  return index === 0 || text[index - 1] === "\n";
+}
+function readLine(text, index) {
+  if (index >= text.length) {
+    return void 0;
+  }
+  const lineEnd = text.indexOf("\n", index);
+  if (lineEnd < 0) {
+    return { content: text.slice(index), end: text.length };
+  }
+  return { content: text.slice(index, lineEnd), end: lineEnd + 1 };
+}
+function isTableContentLine(line) {
+  return line.trim().length > 0 && hasUnescapedPipe(line);
+}
+function hasUnescapedPipe(line) {
+  let escaped = false;
+  for (const char of line) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      return true;
+    }
+  }
+  return false;
+}
+function isTableDelimiterLine(line) {
+  const trimmed = line.trim();
+  if (!hasUnescapedPipe(trimmed)) {
+    return false;
+  }
+  const cells = trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+function isTagBoundaryBefore(text, index) {
+  if (index === 0) {
+    return true;
+  }
+  const previous = text[index - 1] ?? "";
+  return /[\s([{:;,，。；：！？]/u.test(previous);
+}
+function isObsidianTagChar(char) {
+  return char.length > 0 && !/[\s#\[\]{}()<>.,;:!?，。；：！？]/u.test(char);
 }
 function* iterateCodePoints(text) {
   for (const char of text) {
@@ -426,11 +601,21 @@ function renderNoteView(markdown, mentions, options) {
   let replacementIndex = 0;
   let consumedSourceEnd = -1;
   for (const token of tokens) {
+    let current = replacements[replacementIndex];
+    while (current !== void 0 && current.sourceEnd <= token.sourceStart) {
+      replacementIndex += 1;
+      current = replacements[replacementIndex];
+    }
     if (token.sourceEnd <= consumedSourceEnd) {
       continue;
     }
     if (token.kind === "special") {
       output += token.raw;
+      current = replacements[replacementIndex];
+      while (current !== void 0 && current.sourceStart < token.sourceEnd) {
+        replacementIndex += 1;
+        current = replacements[replacementIndex];
+      }
       if (token.syntax === "thematic_break") {
         seenEids.clear();
       }
@@ -1331,8 +1516,9 @@ function querySqlite(dbPath, sqlText) {
 }
 function runSqlite(dbPath, sqlText, extraArgs = []) {
   try {
-    return (0, import_node_child_process.execFileSync)("sqlite3", [...extraArgs, dbPath, sqlText], {
+    return (0, import_node_child_process.execFileSync)("sqlite3", [...extraArgs, dbPath], {
       encoding: "utf8",
+      input: sqlText,
       maxBuffer: 64 * 1024 * 1024
     });
   } catch (error) {
@@ -1518,14 +1704,15 @@ var init_model_store = __esm({
       )`);
           if (conflict.matches.length > 0) {
             statements.push(
-              `INSERT INTO note_mention_conflict_matches (
+              `WITH new_conflict(id) AS (SELECT last_insert_rowid())
+          INSERT INTO note_mention_conflict_matches (
             conflict_id, resolved_entity_id, resolved_eid, text, surface_id,
             surface, source_start, source_end, candidate_eids_json
           ) ${conflict.matches.map((match, index) => {
                 const resolvedEntity = match.resolvedEid === void 0 ? void 0 : entities.get(match.resolvedEid);
                 const prefix = index === 0 ? "SELECT" : "UNION ALL SELECT";
                 return `${prefix}
-                last_insert_rowid(),
+                new_conflict.id,
                 ${sqlValue(resolvedEntity?.id)},
                 ${sqlValue(match.resolvedEid)},
                 ${sqlValue(match.text)},
@@ -1533,7 +1720,8 @@ var init_model_store = __esm({
                 ${sqlValue(match.surface)},
                 ${sqlValue(match.sourceStart)},
                 ${sqlValue(match.sourceEnd)},
-                ${sqlValue(JSON.stringify(match.eids))}`;
+                ${sqlValue(JSON.stringify(match.eids))}
+                FROM new_conflict`;
               }).join("\n")}`
             );
           }
@@ -1570,13 +1758,21 @@ function syncNote(input) {
   if (!(0, import_node_fs4.existsSync)(notePath.absolutePath)) {
     throw new Error(`Note does not exist: ${notePath.viewPath}`);
   }
+  if (isInsideEntityDir(notePath.viewPath, context.settings.entityDir)) {
+    throw new Error(`sync-note only accepts user note views: ${notePath.viewPath}`);
+  }
+  if (!context.settings.runtimeDir) {
+    throw new Error(
+      "Runtime dataset is not configured. Set runtimeDir in the WikiPage Spine plugin settings."
+    );
+  }
   const runtimeDir = resolveConfiguredPath(
     context.vaultDir,
     context.settings.runtimeDir
   );
-  if (!context.settings.runtimeDir || !SurfaceMatcher.exists(runtimeDir)) {
+  if (!SurfaceMatcher.exists(runtimeDir)) {
     throw new Error(
-      `Runtime dataset is not configured or missing manifest.json: ${runtimeDir}`
+      `Runtime dataset manifest.json is missing: ${runtimeDir}`
     );
   }
   const databasePath = resolveConfiguredPath(
@@ -1694,6 +1890,13 @@ function entityViewPathFromLinkTarget(target, settings) {
     return void 0;
   }
   return rest.endsWith(".md") ? normalized : `${normalized}.md`;
+}
+function isInsideEntityDir(viewPath, entityDir) {
+  const normalizedDir = entityDir.replace(/\/+$/g, "");
+  if (!normalizedDir) {
+    return false;
+  }
+  return viewPath === normalizedDir || viewPath.startsWith(`${normalizedDir}/`);
 }
 function normalizeObsidianLinkTarget(target) {
   const withoutFragment = target.split(/[#"^]/, 1)[0] ?? "";

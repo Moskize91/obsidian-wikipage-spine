@@ -30,7 +30,13 @@ export type SpecialSyntax =
   | "html_comment"
   | "wikilink"
   | "markdown_link"
-  | "markdown_image";
+  | "markdown_image"
+  | "footnote_ref"
+  | "footnote_def"
+  | "markdown_table"
+  | "blockquote"
+  | "markdown_emphasis"
+  | "obsidian_tag";
 
 export function normalizeObsidianView(
   markdown: string,
@@ -49,6 +55,20 @@ export function normalizeObsidianView(
   }
 
   while (index < markdown.length) {
+    const blockquote = readBlockquote(markdown, index);
+    if (blockquote !== undefined) {
+      pushSpecial(tokens, "blockquote", markdown, index, blockquote);
+      index = blockquote;
+      continue;
+    }
+
+    const markdownTable = readMarkdownTable(markdown, index);
+    if (markdownTable !== undefined) {
+      pushSpecial(tokens, "markdown_table", markdown, index, markdownTable);
+      index = markdownTable;
+      continue;
+    }
+
     const thematicBreak = readThematicBreak(markdown, index);
     if (thematicBreak !== undefined) {
       pushSpecial(tokens, "thematic_break", markdown, index, thematicBreak);
@@ -135,10 +155,44 @@ export function normalizeObsidianView(
       continue;
     }
 
+    const footnoteDefinition = readFootnoteDefinition(markdown, index);
+    if (footnoteDefinition !== undefined) {
+      pushSpecial(tokens, "footnote_def", markdown, index, footnoteDefinition);
+      index = footnoteDefinition;
+      continue;
+    }
+
+    const footnoteReference = readFootnoteReference(markdown, index);
+    if (footnoteReference !== undefined) {
+      pushSpecial(tokens, "footnote_ref", markdown, index, footnoteReference);
+      index = footnoteReference;
+      continue;
+    }
+
     const inlineCode = readInlineCode(markdown, index);
     if (inlineCode !== undefined) {
       pushSpecial(tokens, "inline_code", markdown, index, inlineCode);
       index = inlineCode;
+      continue;
+    }
+
+    const emphasisMarker = readMarkdownEmphasisMarker(markdown, index);
+    if (emphasisMarker !== undefined) {
+      pushSpecial(
+        tokens,
+        "markdown_emphasis",
+        markdown,
+        index,
+        emphasisMarker,
+      );
+      index = emphasisMarker;
+      continue;
+    }
+
+    const obsidianTag = readObsidianTag(markdown, index);
+    if (obsidianTag !== undefined) {
+      pushSpecial(tokens, "obsidian_tag", markdown, index, obsidianTag);
+      index = obsidianTag;
       continue;
     }
 
@@ -221,12 +275,188 @@ function isThematicBreakLine(line: string): boolean {
   return match !== null;
 }
 
+function readBlockquote(text: string, index: number): number | undefined {
+  if (!isLineStart(text, index) || !/^ {0,3}>/.test(text.slice(index))) {
+    return undefined;
+  }
+  let end = index;
+  let cursor = index;
+  while (cursor < text.length) {
+    const line = readLine(text, cursor);
+    if (line === undefined || !/^ {0,3}>/.test(line.content)) {
+      break;
+    }
+    end = line.end;
+    cursor = line.end;
+  }
+  // 引文往往是外部文本证据；自动改写会让引用内容不再忠于原文。
+  // https://spec.commonmark.org/0.31.2/#block-quotes
+  return end;
+}
+
+function readMarkdownTable(text: string, index: number): number | undefined {
+  if (!isLineStart(text, index)) {
+    return undefined;
+  }
+  const header = readLine(text, index);
+  if (header === undefined) {
+    return undefined;
+  }
+  if (!isTableContentLine(header.content)) {
+    return undefined;
+  }
+  const delimiter = readLine(text, header.end);
+  if (delimiter === undefined || !isTableDelimiterLine(delimiter.content)) {
+    return undefined;
+  }
+
+  let end = delimiter.end;
+  let cursor = delimiter.end;
+  while (cursor < text.length) {
+    const row = readLine(text, cursor);
+    if (row === undefined || !isTableContentLine(row.content)) {
+      break;
+    }
+    end = row.end;
+    cursor = row.end;
+  }
+
+  // GFM 表格是一整块块级结构；自动插入 wikilink 会改变表格渲染边界，先整体隔离。
+  // https://github.github.com/gfm/#tables-extension-
+  return end;
+}
+
+function readFootnoteDefinition(
+  text: string,
+  index: number,
+): number | undefined {
+  if (!isLineStart(text, index)) {
+    return undefined;
+  }
+  const match = /^ {0,3}\[\^[^\]\r\n]+\]:[ \t]*/.exec(text.slice(index));
+  // footnote label 是被引用的结构 ID，不是正文 surface；正文部分仍可按普通文本处理。
+  // https://github.github.com/gfm/#footnotes-extension-
+  return match === null ? undefined : index + match[0].length;
+}
+
+function readFootnoteReference(
+  text: string,
+  index: number,
+): number | undefined {
+  const match = /^\[\^[^\]\r\n]+\]/.exec(text.slice(index));
+  // footnote reference 的 label 不能被实体替换，否则会生成非法 Markdown 引用。
+  // https://github.github.com/gfm/#footnotes-extension-
+  return match === null ? undefined : index + match[0].length;
+}
+
+function readMarkdownEmphasisMarker(
+  text: string,
+  index: number,
+): number | undefined {
+  const char = text[index];
+  if (char !== "*" && char !== "_") {
+    return undefined;
+  }
+  let end = index;
+  while (text[end] === char && end - index < 3) {
+    end += 1;
+  }
+  // emphasis delimiter 是排版结构，不是正文 surface；保留它能避免把粗体/斜体标记改写成链接。
+  // https://spec.commonmark.org/0.31.2/#emphasis-and-strong-emphasis
+  return end;
+}
+
+function readObsidianTag(text: string, index: number): number | undefined {
+  if (text[index] !== "#" || !isTagBoundaryBefore(text, index)) {
+    return undefined;
+  }
+  let end = index + 1;
+  while (end < text.length && isObsidianTagChar(text[end] ?? "")) {
+    end += 1;
+  }
+  if (end === index + 1) {
+    return undefined;
+  }
+  const body = text.slice(index + 1, end);
+  if (!/[^\d/]/u.test(body)) {
+    return undefined;
+  }
+  // Obsidian tag 是检索元数据；把 tag 内部改写成链接会破坏用户已有的分类维度。
+  // https://help.obsidian.md/tags
+  return end;
+}
+
 function readCodePoint(text: string, index: number): string {
   const codePoint = text.codePointAt(index);
   if (codePoint === undefined) {
     return "";
   }
   return String.fromCodePoint(codePoint);
+}
+
+function isLineStart(text: string, index: number): boolean {
+  return index === 0 || text[index - 1] === "\n";
+}
+
+function readLine(
+  text: string,
+  index: number,
+): { content: string; end: number } | undefined {
+  if (index >= text.length) {
+    return undefined;
+  }
+  const lineEnd = text.indexOf("\n", index);
+  if (lineEnd < 0) {
+    return { content: text.slice(index), end: text.length };
+  }
+  return { content: text.slice(index, lineEnd), end: lineEnd + 1 };
+}
+
+function isTableContentLine(line: string): boolean {
+  return line.trim().length > 0 && hasUnescapedPipe(line);
+}
+
+function hasUnescapedPipe(line: string): boolean {
+  let escaped = false;
+  for (const char of line) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isTableDelimiterLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!hasUnescapedPipe(trimmed)) {
+    return false;
+  }
+  const cells = trimmed
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTagBoundaryBefore(text: string, index: number): boolean {
+  if (index === 0) {
+    return true;
+  }
+  const previous = text[index - 1] ?? "";
+  return /[\s([{:;,，。；：！？]/u.test(previous);
+}
+
+function isObsidianTagChar(char: string): boolean {
+  return char.length > 0 && !/[\s#\[\]{}()<>.,;:!?，。；：！？]/u.test(char);
 }
 
 function* iterateCodePoints(text: string): Generator<string> {

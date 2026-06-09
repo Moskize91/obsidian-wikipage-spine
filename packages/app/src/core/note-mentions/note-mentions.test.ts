@@ -68,6 +68,63 @@ describe("note mentions", () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  it("keeps footnote references out of entity extraction", () => {
+    const scanner = new LiteralScanner(["^1", "1"]);
+
+    const result = extractNoteMentions("见证[^1]", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("protects markdown tables as matcher barriers", () => {
+    const scanner = new LiteralScanner(["年代", "---", "迦太基会议"]);
+
+    const result = extractNoteMentions(
+      "|年代|节点|\n|---|---|\n|418|迦太基会议|\n",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("keeps Obsidian tags out of entity extraction", () => {
+    const scanner = new LiteralScanner(["想法"]);
+
+    const result = extractNoteMentions("#想法", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("keeps markdown emphasis markers out of entity extraction", () => {
+    const scanner = new LiteralScanner(["**"]);
+
+    const result = extractNoteMentions(
+      "**不完全对应**",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("protects blockquotes as matcher barriers", () => {
+    const scanner = new LiteralScanner(["Augustine"]);
+
+    const result = extractNoteMentions(
+      "> Augustine\n\nAugustine",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.resolved).toHaveLength(1);
+    expect(result.resolved[0]?.sourceStart).toBe(13);
+  });
+
   it("resolves isolated unique surface matches", () => {
     const scanner = new FakeScanner([
       surfaceMatch({
@@ -265,6 +322,32 @@ class FakeScanner implements SurfaceScanner {
 
   scan(): Iterable<SurfaceMatch> {
     return this.matches;
+  }
+}
+
+class LiteralScanner implements SurfaceScanner {
+  constructor(private readonly surfaces: string[]) {}
+
+  scan(texts: Iterable<string>): Iterable<SurfaceMatch> {
+    const matches: SurfaceMatch[] = [];
+    for (const text of texts) {
+      for (const [index, surface] of this.surfaces.entries()) {
+        const start = text.indexOf(surface);
+        if (start < 0) {
+          continue;
+        }
+        matches.push(
+          surfaceMatch({
+            start,
+            end: start + surface.length,
+            surface,
+            surfaceId: index + 1,
+            qids: [`Q${index + 1}`],
+          }),
+        );
+      }
+    }
+    return matches;
   }
 }
 
