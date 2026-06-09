@@ -27,6 +27,15 @@ note view 修改检测分两级：
 
 只有修改时间不同且 hash 不同时，note 才能被标记为 `modified`。如果修改时间不同但 hash 相同，只更新 `view_mtime_unix_ms`、`view_size_bytes` 等观测字段，note 状态保持原样。
 
+执行 `modified -> synced` 的同步操作时，先把 note view 标准化为文本流。Obsidian / Markdown 特殊结构会成为 matcher barrier；如果特殊结构是指向托管 entity view 的内部链接，则只展开用户可见文字，不能继承旧的 surface 到 EID 绑定。
+
+标准化后的连续文本段交给 `SurfaceMatcher`。同步操作产出两类结构：
+
+- `ResolvedMention`: 孤立 surface match 且只有唯一 EID，可直接拍板。
+- `MentionConflict`: 单个 surface 对应多个 EID，或多个 surface match 重叠、嵌套成团，需要后续消歧。
+
+`MentionConflict` 使用局部语境和候选集合计算 hash。同步时应尽量继承 hash 相同的既有消歧结果，因为人工或 LLM 消歧成本高。
+
 ## Entity
 
 `entity` 指从 wikipage / Wikidata EID 体系中生成的数据库记录。entity 也有 Markdown view，但这些 view 原则上由系统管理，不是用户创作的笔记。
