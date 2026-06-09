@@ -63,10 +63,61 @@ export const MODEL_SCHEMA_SQL = [
     created_at_unix_ms INTEGER NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS note_mentions (
+    id INTEGER PRIMARY KEY,
+    note_id INTEGER NOT NULL
+      REFERENCES notes(id) ON DELETE CASCADE,
+    entity_id INTEGER
+      REFERENCES entities(id) ON DELETE SET NULL,
+    eid TEXT NOT NULL,
+    text TEXT NOT NULL,
+    surface_id INTEGER NOT NULL,
+    surface TEXT,
+    source_start INTEGER NOT NULL,
+    source_end INTEGER NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL,
+    CHECK (source_start >= 0 AND source_end > source_start)
+  )`,
+  `CREATE TABLE IF NOT EXISTS note_mention_conflicts (
+    id INTEGER PRIMARY KEY,
+    note_id INTEGER NOT NULL
+      REFERENCES notes(id) ON DELETE CASCADE,
+    hash TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source_start INTEGER NOT NULL,
+    source_end INTEGER NOT NULL,
+    left_context TEXT NOT NULL,
+    right_context TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL,
+    CHECK (source_start >= 0 AND source_end > source_start)
+  )`,
+  `CREATE TABLE IF NOT EXISTS note_mention_conflict_matches (
+    id INTEGER PRIMARY KEY,
+    conflict_id INTEGER NOT NULL
+      REFERENCES note_mention_conflicts(id) ON DELETE CASCADE,
+    resolved_entity_id INTEGER
+      REFERENCES entities(id) ON DELETE SET NULL,
+    resolved_eid TEXT,
+    text TEXT NOT NULL,
+    surface_id INTEGER NOT NULL,
+    surface TEXT,
+    source_start INTEGER NOT NULL,
+    source_end INTEGER NOT NULL,
+    candidate_eids_json TEXT NOT NULL,
+    CHECK (source_start >= 0 AND source_end > source_start)
+  )`,
   "CREATE INDEX IF NOT EXISTS notes_status_idx ON notes(status)",
   "CREATE INDEX IF NOT EXISTS notes_view_seen_scan_idx ON notes(view_last_seen_scan_id)",
   "CREATE INDEX IF NOT EXISTS entities_ref_count_idx ON entities(ref_count)",
   "CREATE INDEX IF NOT EXISTS entities_view_seen_scan_idx ON entities(view_last_seen_scan_id)",
+  "CREATE INDEX IF NOT EXISTS note_mentions_note_id_idx ON note_mentions(note_id)",
+  "CREATE INDEX IF NOT EXISTS note_mentions_eid_idx ON note_mentions(eid)",
+  "CREATE INDEX IF NOT EXISTS note_mention_conflicts_note_id_idx ON note_mention_conflicts(note_id)",
+  "CREATE INDEX IF NOT EXISTS note_mention_conflicts_hash_idx ON note_mention_conflicts(hash)",
+  "CREATE INDEX IF NOT EXISTS note_mention_conflict_matches_conflict_id_idx ON note_mention_conflict_matches(conflict_id)",
+  "CREATE INDEX IF NOT EXISTS note_mention_conflict_matches_resolved_eid_idx ON note_mention_conflict_matches(resolved_eid)",
 ] as const;
 
 export const MODEL_QUERY_SQL = {
@@ -77,6 +128,11 @@ export const MODEL_QUERY_SQL = {
   selectUnreferencedEntities: "SELECT * FROM entities WHERE ref_count = 0 ORDER BY id",
   selectStaleEntityViews:
     "SELECT * FROM entities WHERE view_last_seen_scan_id IS NULL OR view_last_seen_scan_id <> ? ORDER BY id",
+  selectNoteMentions: "SELECT * FROM note_mentions WHERE note_id = ? ORDER BY source_start, id",
+  selectNoteMentionConflicts:
+    "SELECT * FROM note_mention_conflicts WHERE note_id = ? ORDER BY source_start, id",
+  selectNoteMentionConflictMatches:
+    "SELECT * FROM note_mention_conflict_matches WHERE conflict_id = ? ORDER BY source_start, id",
 } as const;
 
 export async function initializeModelDatabase(db: SqlExecutor): Promise<void> {

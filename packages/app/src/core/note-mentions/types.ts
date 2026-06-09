@@ -6,6 +6,7 @@ export interface SurfaceScanner {
 
 export interface NoteMentionOptions {
   isEntityViewLinkTarget(target: string): boolean;
+  resolveEntityViewLinkTarget?: (target: string) => string | undefined;
 }
 
 export type NormalizedViewToken = NormalizedViewChar | NormalizedViewSpecial;
@@ -15,6 +16,7 @@ export interface NormalizedViewChar {
   char: string;
   sourceStart: number;
   sourceEnd: number;
+  expandedEntityEid?: string;
 }
 
 export interface NormalizedViewSpecial {
@@ -87,4 +89,5 @@ export interface ConflictSurfaceMatch {
   sourceStart: number;
   sourceEnd: number;
   eids: string[];
+  resolvedEid?: string;
 }

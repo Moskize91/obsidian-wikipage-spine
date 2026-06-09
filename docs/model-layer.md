@@ -36,6 +36,14 @@ note view 修改检测分两级：
 
 `MentionConflict` 使用局部语境和候选集合计算 hash。同步时应尽量继承 hash 相同的既有消歧结果，因为人工或 LLM 消歧成本高。
 
+同步结果只保存当前状态，不保存历史。自动拍板的 `ResolvedMention` 写入 `note_mentions`。需要消歧的 `MentionConflict` 写入 `note_mention_conflicts`，其内部的 `ConflictSurfaceMatch` 写入 `note_mention_conflict_matches`。
+
+`note_mention_conflict_matches.resolved_eid` 表示该候选 surface match 在当前 conflict 方案中被选为哪个 EID。一个 conflict 可以有多个 match 带 `resolved_eid`，例如 `北京大学` 可以被解决为 `北京` 和 `大学` 两个引用。
+
+同一个 conflict 内所有已 resolved 的 match 不能重叠。SQLite schema 不表达这个约束；写入或继承 conflict resolution 的业务逻辑必须维护它。
+
+如果标准化阶段展开了旧实体内部链接，且新产生的 `MentionConflict` 中某个 `ConflictSurfaceMatch` 精确覆盖该展开文本，并且候选 EID 包含旧链接指向的 EID，则可以直接把该 match 标记为 `resolved_eid`。这用于保留 `[[wiki/北京]]大学` 或 `[[wiki/北京]][[wiki/大学]]` 这类原始链接表达出的用户选择。
+
 ## Entity
 
 `entity` 指从 wikipage / Wikidata EID 体系中生成的数据库记录。entity 也有 Markdown view，但这些 view 原则上由系统管理，不是用户创作的笔记。

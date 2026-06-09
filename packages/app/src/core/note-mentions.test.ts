@@ -8,7 +8,10 @@ import {
 
 const entityLinkOptions = {
   isEntityViewLinkTarget(target: string): boolean {
-    return normalizePath(target).startsWith("wiki/");
+    return resolveEntityTarget(target) !== undefined;
+  },
+  resolveEntityViewLinkTarget(target: string): string | undefined {
+    return resolveEntityTarget(target);
   },
 };
 
@@ -156,6 +159,84 @@ describe("note mentions", () => {
     ]);
   });
 
+  it("uses an expanded entity wikilink as a conflict resolution hint", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 0,
+        end: 2,
+        surface: "北京",
+        surfaceId: 1,
+        qids: ["Q956"],
+      }),
+      surfaceMatch({
+        start: 2,
+        end: 4,
+        surface: "大学",
+        surfaceId: 2,
+        qids: ["Q3918"],
+      }),
+      surfaceMatch({
+        start: 0,
+        end: 4,
+        surface: "北京大学",
+        surfaceId: 3,
+        qids: ["Q3918"],
+      }),
+    ]);
+
+    const result = extractNoteMentions(
+      "[[wiki/北京]]大学",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.matches).toMatchObject([
+      { text: "北京", resolvedEid: "Q956" },
+      { text: "北京大学" },
+      { text: "大学" },
+    ]);
+  });
+
+  it("uses adjacent expanded entity wikilinks as independent conflict resolution hints", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 0,
+        end: 2,
+        surface: "北京",
+        surfaceId: 1,
+        qids: ["Q956"],
+      }),
+      surfaceMatch({
+        start: 2,
+        end: 4,
+        surface: "大学",
+        surfaceId: 2,
+        qids: ["Q3918"],
+      }),
+      surfaceMatch({
+        start: 0,
+        end: 4,
+        surface: "北京大学",
+        surfaceId: 3,
+        qids: ["Q3918"],
+      }),
+    ]);
+
+    const result = extractNoteMentions(
+      "[[wiki/北京]][[wiki/大学]]",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.matches).toMatchObject([
+      { text: "北京", resolvedEid: "Q956" },
+      { text: "北京大学" },
+      { text: "大学", resolvedEid: "Q3918" },
+    ]);
+  });
+
   it("keeps conflict hashes stable across unrelated source markup changes", () => {
     const scanner = new FakeScanner([
       surfaceMatch({
@@ -189,6 +270,18 @@ class FakeScanner implements SurfaceScanner {
 
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function resolveEntityTarget(target: string): string | undefined {
+  const entityByPath = new Map([
+    ["wiki/艾萨克·牛顿.md", "Q935"],
+    ["wiki/艾萨克·牛顿", "Q935"],
+    ["wiki/苹果.md", "Q89"],
+    ["wiki/苹果", "Q89"],
+    ["wiki/北京", "Q956"],
+    ["wiki/大学", "Q3918"],
+  ]);
+  return entityByPath.get(normalizePath(target));
 }
 
 function surfaceMatch(input: {

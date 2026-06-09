@@ -93,14 +93,20 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
     cluster.segmentEnd,
     "right",
   );
-  const matches = cluster.matches.map((match) => ({
-    text: match.text,
-    surfaceId: match.match.surfaceId,
-    surface: match.match.surface,
-    sourceStart: match.sourceStart,
-    sourceEnd: match.sourceEnd,
-    eids: match.match.qids,
-  }));
+  const matches = cluster.matches.map((match) => {
+    const conflictMatch = {
+      text: match.text,
+      surfaceId: match.match.surfaceId,
+      surface: match.match.surface,
+      sourceStart: match.sourceStart,
+      sourceEnd: match.sourceEnd,
+      eids: match.match.qids,
+    };
+    const resolvedEid = resolveExpandedEntityMatch(match);
+    return resolvedEid === undefined
+      ? conflictMatch
+      : { ...conflictMatch, resolvedEid };
+  });
   const hash = createConflictHash({
     text,
     leftContext,
@@ -118,6 +124,29 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
     rightContext,
     matches,
   };
+}
+
+function resolveExpandedEntityMatch(
+  match: PositionedSurfaceMatch,
+): string | undefined {
+  const chars = match.segment.chars.slice(match.segmentStart, match.segmentEnd);
+  const first = chars[0];
+  if (first?.expandedEntityEid === undefined) {
+    return undefined;
+  }
+  const sameExpandedLink = chars.every(
+    (char) =>
+      char.expandedEntityEid === first.expandedEntityEid &&
+      char.sourceStart === first.sourceStart &&
+      char.sourceEnd === first.sourceEnd,
+  );
+  if (!sameExpandedLink) {
+    return undefined;
+  }
+  if (!match.match.qids.includes(first.expandedEntityEid)) {
+    return undefined;
+  }
+  return first.expandedEntityEid;
 }
 
 function sliceSegmentChars(

@@ -45,8 +45,22 @@ export function normalizeObsidianView(
     const wikilink = readWikilink(markdown, index);
     if (wikilink !== undefined) {
       // 旧的实体链接只能贡献用户看见的文字，不能继承上一次 surface 到 EID 的绑定。
-      if (!wikilink.embed && options.isEntityViewLinkTarget(wikilink.target)) {
-        pushText(tokens, wikilink.display, wikilink.start, wikilink.end);
+      const expandedEntityEid = resolveExpandedEntityEid(
+        wikilink.target,
+        options,
+      );
+      if (
+        !wikilink.embed &&
+        (expandedEntityEid !== undefined ||
+          options.isEntityViewLinkTarget(wikilink.target))
+      ) {
+        pushText(
+          tokens,
+          wikilink.display,
+          wikilink.start,
+          wikilink.end,
+          expandedEntityEid,
+        );
       } else {
         pushSpecial(tokens, "wikilink", markdown, wikilink.start, wikilink.end);
       }
@@ -57,15 +71,21 @@ export function normalizeObsidianView(
     const markdownLink = readMarkdownLink(markdown, index);
     if (markdownLink !== undefined) {
       // Obsidian 的内部链接不只有 wikilink；托管实体目录里的 Markdown link 也需要被重新判定。
+      const expandedEntityEid = resolveExpandedEntityEid(
+        markdownLink.target,
+        options,
+      );
       if (
         !markdownLink.image &&
-        options.isEntityViewLinkTarget(markdownLink.target)
+        (expandedEntityEid !== undefined ||
+          options.isEntityViewLinkTarget(markdownLink.target))
       ) {
         pushText(
           tokens,
           markdownLink.label,
           markdownLink.start,
           markdownLink.end,
+          expandedEntityEid,
         );
       } else {
         pushSpecial(
@@ -121,10 +141,21 @@ function pushText(
   text: string,
   sourceStart: number,
   sourceEnd: number,
+  expandedEntityEid?: string,
 ): void {
   for (const char of iterateCodePoints(text)) {
-    tokens.push({ kind: "char", char, sourceStart, sourceEnd });
+    const token = { kind: "char" as const, char, sourceStart, sourceEnd };
+    tokens.push(
+      expandedEntityEid === undefined ? token : { ...token, expandedEntityEid },
+    );
   }
+}
+
+function resolveExpandedEntityEid(
+  target: string,
+  options: NoteMentionOptions,
+): string | undefined {
+  return options.resolveEntityViewLinkTarget?.(target);
 }
 
 function readCodePoint(text: string, index: number): string {
