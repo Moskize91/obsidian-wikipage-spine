@@ -1,4 +1,17 @@
 import type { SurfaceMatch } from "../surface-matcher";
+import type {
+  NormalizedViewChar,
+  NormalizedViewSpecial,
+  NormalizedViewToken,
+  SpecialSyntax,
+} from "../view-tokens";
+
+export type {
+  NormalizedViewChar,
+  NormalizedViewSpecial,
+  NormalizedViewToken,
+  SpecialSyntax,
+} from "../view-tokens";
 
 export interface SurfaceScanner {
   scan(chunks: Iterable<string>): Iterable<SurfaceMatch>;
@@ -8,34 +21,6 @@ export interface NoteMentionOptions {
   isEntityViewLinkTarget(target: string): boolean;
   resolveEntityViewLinkTarget?: (target: string) => string | undefined;
 }
-
-export type NormalizedViewToken = NormalizedViewChar | NormalizedViewSpecial;
-
-export interface NormalizedViewChar {
-  kind: "char";
-  char: string;
-  sourceStart: number;
-  sourceEnd: number;
-  expandedEntityEid?: string;
-}
-
-export interface NormalizedViewSpecial {
-  kind: "special";
-  syntax: SpecialSyntax;
-  raw: string;
-  sourceStart: number;
-  sourceEnd: number;
-}
-
-export type SpecialSyntax =
-  | "frontmatter"
-  | "fenced_code"
-  | "inline_code"
-  | "html"
-  | "html_comment"
-  | "wikilink"
-  | "markdown_link"
-  | "markdown_image";
 
 export interface TextSegment {
   chars: NormalizedViewChar[];

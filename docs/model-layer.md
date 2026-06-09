@@ -44,6 +44,12 @@ note view 修改检测分两级：
 
 如果标准化阶段展开了旧实体内部链接，且新产生的 `MentionConflict` 中某个 `ConflictSurfaceMatch` 精确覆盖该展开文本，并且候选 EID 包含旧链接指向的 EID，则可以直接把该 match 标记为 `resolved_eid`。这用于保留 `[[wiki/北京]]大学` 或 `[[wiki/北京]][[wiki/大学]]` 这类原始链接表达出的用户选择。
 
+note 数据库状态变化后，应触发数据库到 view 的 react 写回。写回使用同一套标准化 token 流，按 `ResolvedMention` 和 `MentionConflict` 当前状态生成新的 Markdown 文本，再由外层写入临时文件并原子替换原 view。
+
+写回时，同一 section 内每个 EID 只渲染第一次内部链接，后续相同 EID 只输出纯文本。section 由正文中的 Markdown thematic break 分隔；文件开头 frontmatter 的 `---` 不作为 section 分隔。
+
+未解决的 `MentionConflict` 按最长且不重叠的唯一候选渲染。这个规则用于减少短词链接造成的视觉污染。
+
 ## Entity
 
 `entity` 指从 wikipage / Wikidata EID 体系中生成的数据库记录。entity 也有 Markdown view，但这些 view 原则上由系统管理，不是用户创作的笔记。

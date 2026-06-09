@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { SurfaceMatch } from "./surface-matcher";
+import type { SurfaceMatch } from "../surface-matcher";
 import {
   extractNoteMentions,
   normalizeObsidianView,
   type SurfaceScanner,
-} from "./note-mentions";
+} from ".";
 
 const entityLinkOptions = {
   isEntityViewLinkTarget(target: string): boolean {
