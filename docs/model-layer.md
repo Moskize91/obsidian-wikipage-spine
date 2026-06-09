@@ -20,6 +20,13 @@ note 与 view 之间有三种状态：
 
 模型层不保存扫描范围，也不保存扫描历史。每次扫描只记录 note view 最后一次出现的 `view_last_seen_scan_id` 和 `view_last_scanned_at_unix_ms`，用于判断缺失和调试。
 
+note view 修改检测分两级：
+
+1. 比较文件最后修改时间和数据库中的 `view_mtime_unix_ms`。如果相同，不读取文件、不计算 hash，note 状态保持原样。
+2. 如果修改时间不同，流式读取 view 文件并计算 hash，再与数据库中的 `view_hash` 比较。
+
+只有修改时间不同且 hash 不同时，note 才能被标记为 `modified`。如果修改时间不同但 hash 相同，只更新 `view_mtime_unix_ms`、`view_size_bytes` 等观测字段，note 状态保持原样。
+
 ## Entity
 
 `entity` 指从 wikipage / Wikidata EID 体系中生成的数据库记录。entity 也有 Markdown view，但这些 view 原则上由系统管理，不是用户创作的笔记。
