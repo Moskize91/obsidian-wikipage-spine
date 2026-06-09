@@ -20,7 +20,10 @@ export interface RuntimeManifest {
   mode: "charwise";
   state_record_bytes: number;
   state_output_record_bytes: number;
-  qid_index_record_bytes: number;
+  qid_index_record_bytes?: number;
+  surface_eid_index_record_bytes?: number;
+  eid_predicate_index_record_bytes?: number;
+  eid_predicate_value_record_bytes?: number;
   states_len: number;
   surface_count: number;
   state_output_count: number;
@@ -29,8 +32,14 @@ export interface RuntimeManifest {
     char_code_map: string;
     states: string;
     state_outputs: string;
-    qid_index: string;
-    qid_values: string;
+    qid_index?: string;
+    qid_values?: string;
+    surface_eid_index?: string;
+    surface_eid_values?: string;
+    eid_qid_numbers?: string;
+    eid_flags?: string;
+    eid_predicate_index?: string;
+    eid_predicate_values?: string;
   };
 }
 
@@ -64,8 +73,11 @@ export class SurfaceMatcher {
   private readonly charCodeMap: U32Table;
   private readonly states: RecordTable;
   private readonly stateOutputs: RecordTable;
-  private readonly qidIndex: RecordTable;
-  private readonly qidValues: U32Table;
+  private readonly qidIndex?: RecordTable;
+  private readonly qidValues?: U32Table;
+  private readonly surfaceEidIndex?: RecordTable;
+  private readonly surfaceEidValues?: U32Table;
+  private readonly eidQidNumbers?: U32Table;
   private readonly captureSurface: boolean;
   private readonly captureWindowUtf16: number;
 
@@ -102,17 +114,38 @@ export class SurfaceMatcher {
       options.outputCacheBlocks ?? 16,
       blockBytes,
     );
-    this.qidIndex = new RecordTable(
-      join(rootDir, this.manifest.files.qid_index),
-      this.manifest.qid_index_record_bytes,
-      options.qidCacheBlocks ?? 16,
-      blockBytes,
-    );
-    this.qidValues = new U32Table(
-      join(rootDir, this.manifest.files.qid_values),
-      options.qidCacheBlocks ?? 16,
-      blockBytes,
-    );
+    if (hasEntityCandidateTables(this.manifest)) {
+      this.surfaceEidIndex = new RecordTable(
+        join(rootDir, this.manifest.files.surface_eid_index),
+        this.manifest.surface_eid_index_record_bytes,
+        options.qidCacheBlocks ?? 16,
+        blockBytes,
+      );
+      this.surfaceEidValues = new U32Table(
+        join(rootDir, this.manifest.files.surface_eid_values),
+        options.qidCacheBlocks ?? 16,
+        blockBytes,
+      );
+      this.eidQidNumbers = new U32Table(
+        join(rootDir, this.manifest.files.eid_qid_numbers),
+        options.qidCacheBlocks ?? 16,
+        blockBytes,
+      );
+    } else if (hasLegacyQidTables(this.manifest)) {
+      this.qidIndex = new RecordTable(
+        join(rootDir, this.manifest.files.qid_index),
+        this.manifest.qid_index_record_bytes,
+        options.qidCacheBlocks ?? 16,
+        blockBytes,
+      );
+      this.qidValues = new U32Table(
+        join(rootDir, this.manifest.files.qid_values),
+        options.qidCacheBlocks ?? 16,
+        blockBytes,
+      );
+    } else {
+      throw new Error("runtime manifest does not define candidate tables");
+    }
   }
 
   *scan(chunks: Iterable<string>): Generator<SurfaceMatch> {
@@ -166,8 +199,11 @@ export class SurfaceMatcher {
     this.charCodeMap.close();
     this.states.close();
     this.stateOutputs.close();
-    this.qidIndex.close();
-    this.qidValues.close();
+    this.qidIndex?.close();
+    this.qidValues?.close();
+    this.surfaceEidIndex?.close();
+    this.surfaceEidValues?.close();
+    this.eidQidNumbers?.close();
   }
 
   private nextStateId(initialStateId: number, codePoint: number): number {
@@ -236,6 +272,25 @@ export class SurfaceMatcher {
   }
 
   private readQidNumbers(surfaceId: number): number[] {
+    if (
+      this.surfaceEidIndex !== undefined &&
+      this.surfaceEidValues !== undefined &&
+      this.eidQidNumbers !== undefined
+    ) {
+      const offset = this.surfaceEidIndex.byteOffset(surfaceId);
+      const eidOffset = this.surfaceEidIndex.readU32At(offset);
+      const eidLength = this.surfaceEidIndex.readU32At(offset + 4);
+      const qids: number[] = [];
+      for (let index = 0; index < eidLength; index += 1) {
+        const eidId = this.surfaceEidValues.read(eidOffset + index);
+        qids.push(this.eidQidNumbers.read(eidId));
+      }
+      return qids;
+    }
+
+    if (this.qidIndex === undefined || this.qidValues === undefined) {
+      throw new Error("runtime candidate tables are not configured");
+    }
     const offset = this.qidIndex.byteOffset(surfaceId);
     const qidOffset = this.qidIndex.readU32At(offset);
     const qidLength = this.qidIndex.readU32At(offset + 4);
@@ -245,6 +300,36 @@ export class SurfaceMatcher {
     }
     return qids;
   }
+}
+
+function hasEntityCandidateTables(manifest: RuntimeManifest): manifest is RuntimeManifest & {
+  surface_eid_index_record_bytes: number;
+  files: RuntimeManifest["files"] & {
+    surface_eid_index: string;
+    surface_eid_values: string;
+    eid_qid_numbers: string;
+  };
+} {
+  return (
+    manifest.surface_eid_index_record_bytes !== undefined &&
+    manifest.files.surface_eid_index !== undefined &&
+    manifest.files.surface_eid_values !== undefined &&
+    manifest.files.eid_qid_numbers !== undefined
+  );
+}
+
+function hasLegacyQidTables(manifest: RuntimeManifest): manifest is RuntimeManifest & {
+  qid_index_record_bytes: number;
+  files: RuntimeManifest["files"] & {
+    qid_index: string;
+    qid_values: string;
+  };
+} {
+  return (
+    manifest.qid_index_record_bytes !== undefined &&
+    manifest.files.qid_index !== undefined &&
+    manifest.files.qid_values !== undefined
+  );
 }
 
 function readRuntimeManifest(rootDir: string): RuntimeManifest {
@@ -266,6 +351,17 @@ function validateManifest(manifest: RuntimeManifest): void {
   }
   if (manifest.state_output_record_bytes !== 12) {
     throw new Error(`unsupported state output record size: ${manifest.state_output_record_bytes}`);
+  }
+  if (hasEntityCandidateTables(manifest)) {
+    if (manifest.surface_eid_index_record_bytes !== 8) {
+      throw new Error(
+        `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`,
+      );
+    }
+    return;
+  }
+  if (!hasLegacyQidTables(manifest)) {
+    throw new Error("runtime manifest does not define candidate tables");
   }
   if (manifest.qid_index_record_bytes !== 8) {
     throw new Error(`unsupported qid index record size: ${manifest.qid_index_record_bytes}`);
