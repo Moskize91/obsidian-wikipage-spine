@@ -732,6 +732,9 @@ function toTextSegment(chars) {
 function scanSegment(segment, scanner) {
   const matches = [];
   for (const match of scanner.scan([segment.text])) {
+    if (match.qids.length === 0) {
+      continue;
+    }
     const startIndex = findCharIndexAtOffset(segment.chars, match.start);
     const endIndex = findCharIndexAtOffset(segment.chars, match.end);
     if (startIndex === void 0 || endIndex === void 0 || endIndex <= startIndex) {
@@ -992,7 +995,70 @@ var init_note_mentions = __esm({
   }
 });
 
+// src/core/entity-policy.ts
+function shouldReportEntity(input) {
+  if ((input.flags & ENTITY_FLAG_DISAMBIGUATION) !== 0) {
+    return false;
+  }
+  for (const predicate of input.predicates) {
+    if (POSITIVE_PREDICATES.has(predicate.pid)) {
+      return true;
+    }
+  }
+  return false;
+}
+var ENTITY_FLAG_DISAMBIGUATION, POSITIVE_PREDICATES;
+var init_entity_policy = __esm({
+  "src/core/entity-policy.ts"() {
+    "use strict";
+    ENTITY_FLAG_DISAMBIGUATION = 1;
+    POSITIVE_PREDICATES = /* @__PURE__ */ new Set([
+      69,
+      // educated at
+      106,
+      // occupation
+      108,
+      // employer
+      112,
+      // founded by
+      178,
+      // developer
+      212,
+      // ISBN-13
+      356,
+      // DOI
+      496,
+      // ORCID iD
+      569,
+      // date of birth
+      570,
+      // date of death
+      571,
+      // inception
+      577,
+      // publication date
+      698,
+      // PubMed ID
+      800,
+      // notable work
+      932,
+      // PMCID
+      957
+      // ISBN-10
+    ]);
+  }
+});
+
 // src/core/surface-matcher.ts
+function hasEntityCandidateTables(manifest) {
+  return manifest.surface_eid_index_record_bytes !== void 0 && manifest.files.surface_eid_index !== void 0 && manifest.files.surface_eid_values !== void 0 && manifest.files.eid_qid_numbers !== void 0;
+}
+function hasLegacyQidTables(manifest) {
+  return manifest.qid_index_record_bytes !== void 0 && manifest.files.qid_index !== void 0 && manifest.files.qid_values !== void 0;
+}
+function hasEntityFactTables(manifest) {
+  return manifest.eid_predicate_index_record_bytes !== void 0 && manifest.eid_predicate_value_record_bytes !== void 0 && manifest.files.eid_flags !== void 0 && manifest.files.eid_predicate_index !== void 0 && manifest.files.eid_predicate_values !== void 0;
+}
 function readRuntimeManifest(rootDir) {
   return JSON.parse((0, import_node_fs2.readFileSync)((0, import_node_path2.join)(rootDir, "manifest.json"), "utf8"));
 }
@@ -1011,6 +1077,29 @@ function validateManifest(manifest) {
   }
   if (manifest.state_output_record_bytes !== 12) {
     throw new Error(`unsupported state output record size: ${manifest.state_output_record_bytes}`);
+  }
+  if (hasEntityCandidateTables(manifest)) {
+    if (manifest.surface_eid_index_record_bytes !== 8) {
+      throw new Error(
+        `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`
+      );
+    }
+    if (hasEntityFactTables(manifest)) {
+      if (manifest.eid_predicate_index_record_bytes !== 8) {
+        throw new Error(
+          `unsupported EID predicate index record size: ${manifest.eid_predicate_index_record_bytes}`
+        );
+      }
+      if (manifest.eid_predicate_value_record_bytes !== 8) {
+        throw new Error(
+          `unsupported EID predicate value record size: ${manifest.eid_predicate_value_record_bytes}`
+        );
+      }
+    }
+    return;
+  }
+  if (!hasLegacyQidTables(manifest)) {
+    throw new Error("runtime manifest does not define candidate tables");
   }
   if (manifest.qid_index_record_bytes !== 8) {
     throw new Error(`unsupported qid index record size: ${manifest.qid_index_record_bytes}`);
@@ -1043,6 +1132,7 @@ var init_surface_matcher = __esm({
     "use strict";
     import_node_fs2 = require("fs");
     import_node_path2 = require("path");
+    init_entity_policy();
     ROOT_STATE_ID = 0;
     INVALID_CODE = 4294967295;
     SurfaceMatcher = class _SurfaceMatcher {
@@ -1058,6 +1148,7 @@ var init_surface_matcher = __esm({
         validateManifest(this.manifest);
         this.captureSurface = options.captureSurface ?? true;
         this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
+        this.entityPolicyEnabled = !(options.disableEntityPolicy ?? false) && hasEntityFactTables(this.manifest);
         const blockBytes = options.blockBytes ?? 64 * 1024;
         this.charCodeMap = new U32Table(
           (0, import_node_path2.join)(rootDir, this.manifest.files.char_code_map),
@@ -1076,17 +1167,57 @@ var init_surface_matcher = __esm({
           options.outputCacheBlocks ?? 16,
           blockBytes
         );
-        this.qidIndex = new RecordTable(
-          (0, import_node_path2.join)(rootDir, this.manifest.files.qid_index),
-          this.manifest.qid_index_record_bytes,
-          options.qidCacheBlocks ?? 16,
-          blockBytes
-        );
-        this.qidValues = new U32Table(
-          (0, import_node_path2.join)(rootDir, this.manifest.files.qid_values),
-          options.qidCacheBlocks ?? 16,
-          blockBytes
-        );
+        if (hasEntityCandidateTables(this.manifest)) {
+          this.surfaceEidIndex = new RecordTable(
+            (0, import_node_path2.join)(rootDir, this.manifest.files.surface_eid_index),
+            this.manifest.surface_eid_index_record_bytes,
+            options.qidCacheBlocks ?? 16,
+            blockBytes
+          );
+          this.surfaceEidValues = new U32Table(
+            (0, import_node_path2.join)(rootDir, this.manifest.files.surface_eid_values),
+            options.qidCacheBlocks ?? 16,
+            blockBytes
+          );
+          this.eidQidNumbers = new U32Table(
+            (0, import_node_path2.join)(rootDir, this.manifest.files.eid_qid_numbers),
+            options.qidCacheBlocks ?? 16,
+            blockBytes
+          );
+          if (hasEntityFactTables(this.manifest)) {
+            this.eidFlags = new U32Table(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_flags),
+              options.qidCacheBlocks ?? 16,
+              blockBytes
+            );
+            this.eidPredicateIndex = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_index),
+              this.manifest.eid_predicate_index_record_bytes,
+              options.qidCacheBlocks ?? 16,
+              blockBytes
+            );
+            this.eidPredicateValues = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_values),
+              this.manifest.eid_predicate_value_record_bytes,
+              options.qidCacheBlocks ?? 16,
+              blockBytes
+            );
+          }
+        } else if (hasLegacyQidTables(this.manifest)) {
+          this.qidIndex = new RecordTable(
+            (0, import_node_path2.join)(rootDir, this.manifest.files.qid_index),
+            this.manifest.qid_index_record_bytes,
+            options.qidCacheBlocks ?? 16,
+            blockBytes
+          );
+          this.qidValues = new U32Table(
+            (0, import_node_path2.join)(rootDir, this.manifest.files.qid_values),
+            options.qidCacheBlocks ?? 16,
+            blockBytes
+          );
+        } else {
+          throw new Error("runtime manifest does not define candidate tables");
+        }
       }
       *scan(chunks) {
         let stateId = ROOT_STATE_ID;
@@ -1108,6 +1239,9 @@ var init_surface_matcher = __esm({
           for (const output of this.readOutputChain(state.outputPos)) {
             const start = end - output.utf16Length;
             const qidNumbers = this.readQidNumbers(output.surfaceId);
+            if (qidNumbers.length === 0) {
+              continue;
+            }
             const surface = this.captureSurface && start >= recentStart ? recentText.slice(start - recentStart, end - recentStart) : void 0;
             const match = {
               start,
@@ -1131,8 +1265,14 @@ var init_surface_matcher = __esm({
         this.charCodeMap.close();
         this.states.close();
         this.stateOutputs.close();
-        this.qidIndex.close();
-        this.qidValues.close();
+        this.qidIndex?.close();
+        this.qidValues?.close();
+        this.surfaceEidIndex?.close();
+        this.surfaceEidValues?.close();
+        this.eidQidNumbers?.close();
+        this.eidFlags?.close();
+        this.eidPredicateIndex?.close();
+        this.eidPredicateValues?.close();
       }
       nextStateId(initialStateId, codePoint) {
         const mappedCode = this.readMappedCode(codePoint);
@@ -1193,6 +1333,23 @@ var init_surface_matcher = __esm({
         }
       }
       readQidNumbers(surfaceId) {
+        if (this.surfaceEidIndex !== void 0 && this.surfaceEidValues !== void 0 && this.eidQidNumbers !== void 0) {
+          const offset2 = this.surfaceEidIndex.byteOffset(surfaceId);
+          const eidOffset = this.surfaceEidIndex.readU32At(offset2);
+          const eidLength = this.surfaceEidIndex.readU32At(offset2 + 4);
+          const qids2 = [];
+          for (let index = 0; index < eidLength; index += 1) {
+            const eidId = this.surfaceEidValues.read(eidOffset + index);
+            const qidNumber = this.eidQidNumbers.read(eidId);
+            if (!this.entityPolicyEnabled || this.shouldReportEid(eidId)) {
+              qids2.push(qidNumber);
+            }
+          }
+          return qids2;
+        }
+        if (this.qidIndex === void 0 || this.qidValues === void 0) {
+          throw new Error("runtime candidate tables are not configured");
+        }
         const offset = this.qidIndex.byteOffset(surfaceId);
         const qidOffset = this.qidIndex.readU32At(offset);
         const qidLength = this.qidIndex.readU32At(offset + 4);
@@ -1201,6 +1358,34 @@ var init_surface_matcher = __esm({
           qids.push(this.qidValues.read(qidOffset + index));
         }
         return qids;
+      }
+      shouldReportEid(eidId) {
+        if (this.eidFlags === void 0 || this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+          return true;
+        }
+        return shouldReportEntity({
+          flags: this.eidFlags.read(eidId),
+          predicates: this.readEidPredicates(eidId)
+        });
+      }
+      *readEidPredicates(eidId) {
+        if (this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+          return;
+        }
+        const offset = this.eidPredicateIndex.byteOffset(eidId);
+        const predicateOffset = this.eidPredicateIndex.readU32At(offset);
+        const predicateLength = this.eidPredicateIndex.readU32At(offset + 4);
+        for (let index = 0; index < predicateLength; index += 1) {
+          const predicateRecordOffset = this.eidPredicateValues.byteOffset(
+            predicateOffset + index
+          );
+          yield {
+            pid: this.eidPredicateValues.readU32At(predicateRecordOffset),
+            valueQidNumber: this.eidPredicateValues.readU32At(
+              predicateRecordOffset + 4
+            )
+          };
+        }
       }
     };
     U32Table = class {

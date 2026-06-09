@@ -49,6 +49,9 @@ function scanSegment(
   const matches: PositionedSurfaceMatch[] = [];
 
   for (const match of scanner.scan([segment.text])) {
+    if (match.qids.length === 0) {
+      continue;
+    }
     const startIndex = findCharIndexAtOffset(segment.chars, match.start);
     const endIndex = findCharIndexAtOffset(segment.chars, match.end);
     if (

@@ -41,6 +41,7 @@ describe("SurfaceMatcher", () => {
       outputCacheBlocks: 4,
       qidCacheBlocks: 4,
       mapCacheBlocks: 1,
+      disableEntityPolicy: true,
     });
     opened.push(matcher);
 
@@ -63,6 +64,7 @@ describe("SurfaceMatcher", () => {
       outputCacheBlocks: 1,
       qidCacheBlocks: 1,
       mapCacheBlocks: 1,
+      disableEntityPolicy: true,
     });
     opened.push(matcher);
 
@@ -81,6 +83,7 @@ describe("SurfaceMatcher", () => {
       qidCacheBlocks: 4,
       mapCacheBlocks: 1,
       captureWindowUtf16: 2,
+      disableEntityPolicy: true,
     });
     opened.push(matcher);
 
@@ -98,6 +101,7 @@ describe("SurfaceMatcher", () => {
       outputCacheBlocks: 4,
       qidCacheBlocks: 4,
       mapCacheBlocks: 1,
+      disableEntityPolicy: true,
     });
     opened.push(matcher);
 

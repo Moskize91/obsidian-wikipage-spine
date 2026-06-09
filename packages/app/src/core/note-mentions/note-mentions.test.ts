@@ -153,6 +153,23 @@ describe("note mentions", () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  it("ignores scanner matches whose candidate EID list became empty", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 0,
+        end: 2,
+        surface: "牛顿",
+        surfaceId: 10,
+        qids: [],
+      }),
+    ]);
+
+    const result = extractNoteMentions("牛顿", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
   it("creates conflicts for a single ambiguous surface", () => {
     const scanner = new FakeScanner([
       surfaceMatch({

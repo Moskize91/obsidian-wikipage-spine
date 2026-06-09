@@ -1,5 +1,9 @@
 import { existsSync, openSync, readFileSync, readSync, statSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import {
+  shouldReportEntity,
+  type EntityPredicateFact,
+} from "./entity-policy";
 
 const ROOT_STATE_ID = 0;
 const INVALID_CODE = 0xffffffff;
@@ -12,6 +16,7 @@ export interface SurfaceMatcherOptions {
   blockBytes?: number;
   captureSurface?: boolean;
   captureWindowUtf16?: number;
+  disableEntityPolicy?: boolean;
 }
 
 export interface RuntimeManifest {
@@ -24,6 +29,7 @@ export interface RuntimeManifest {
   surface_eid_index_record_bytes?: number;
   eid_predicate_index_record_bytes?: number;
   eid_predicate_value_record_bytes?: number;
+  eid_predicate_value_count?: number;
   states_len: number;
   surface_count: number;
   state_output_count: number;
@@ -78,6 +84,10 @@ export class SurfaceMatcher {
   private readonly surfaceEidIndex?: RecordTable;
   private readonly surfaceEidValues?: U32Table;
   private readonly eidQidNumbers?: U32Table;
+  private readonly eidFlags?: U32Table;
+  private readonly eidPredicateIndex?: RecordTable;
+  private readonly eidPredicateValues?: RecordTable;
+  private readonly entityPolicyEnabled: boolean;
   private readonly captureSurface: boolean;
   private readonly captureWindowUtf16: number;
 
@@ -95,6 +105,9 @@ export class SurfaceMatcher {
     validateManifest(this.manifest);
     this.captureSurface = options.captureSurface ?? true;
     this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
+    this.entityPolicyEnabled =
+      !(options.disableEntityPolicy ?? false) &&
+      hasEntityFactTables(this.manifest);
 
     const blockBytes = options.blockBytes ?? 64 * 1024;
     this.charCodeMap = new U32Table(
@@ -131,6 +144,25 @@ export class SurfaceMatcher {
         options.qidCacheBlocks ?? 16,
         blockBytes,
       );
+      if (hasEntityFactTables(this.manifest)) {
+        this.eidFlags = new U32Table(
+          join(rootDir, this.manifest.files.eid_flags),
+          options.qidCacheBlocks ?? 16,
+          blockBytes,
+        );
+        this.eidPredicateIndex = new RecordTable(
+          join(rootDir, this.manifest.files.eid_predicate_index),
+          this.manifest.eid_predicate_index_record_bytes,
+          options.qidCacheBlocks ?? 16,
+          blockBytes,
+        );
+        this.eidPredicateValues = new RecordTable(
+          join(rootDir, this.manifest.files.eid_predicate_values),
+          this.manifest.eid_predicate_value_record_bytes,
+          options.qidCacheBlocks ?? 16,
+          blockBytes,
+        );
+      }
     } else if (hasLegacyQidTables(this.manifest)) {
       this.qidIndex = new RecordTable(
         join(rootDir, this.manifest.files.qid_index),
@@ -171,6 +203,9 @@ export class SurfaceMatcher {
       for (const output of this.readOutputChain(state.outputPos)) {
         const start = end - output.utf16Length;
         const qidNumbers = this.readQidNumbers(output.surfaceId);
+        if (qidNumbers.length === 0) {
+          continue;
+        }
         const surface =
           this.captureSurface && start >= recentStart
             ? recentText.slice(start - recentStart, end - recentStart)
@@ -204,6 +239,9 @@ export class SurfaceMatcher {
     this.surfaceEidIndex?.close();
     this.surfaceEidValues?.close();
     this.eidQidNumbers?.close();
+    this.eidFlags?.close();
+    this.eidPredicateIndex?.close();
+    this.eidPredicateValues?.close();
   }
 
   private nextStateId(initialStateId: number, codePoint: number): number {
@@ -283,7 +321,10 @@ export class SurfaceMatcher {
       const qids: number[] = [];
       for (let index = 0; index < eidLength; index += 1) {
         const eidId = this.surfaceEidValues.read(eidOffset + index);
-        qids.push(this.eidQidNumbers.read(eidId));
+        const qidNumber = this.eidQidNumbers.read(eidId);
+        if (!this.entityPolicyEnabled || this.shouldReportEid(eidId)) {
+          qids.push(qidNumber);
+        }
       }
       return qids;
     }
@@ -299,6 +340,40 @@ export class SurfaceMatcher {
       qids.push(this.qidValues.read(qidOffset + index));
     }
     return qids;
+  }
+
+  private shouldReportEid(eidId: number): boolean {
+    if (
+      this.eidFlags === undefined ||
+      this.eidPredicateIndex === undefined ||
+      this.eidPredicateValues === undefined
+    ) {
+      return true;
+    }
+    return shouldReportEntity({
+      flags: this.eidFlags.read(eidId),
+      predicates: this.readEidPredicates(eidId),
+    });
+  }
+
+  private *readEidPredicates(eidId: number): Generator<EntityPredicateFact> {
+    if (this.eidPredicateIndex === undefined || this.eidPredicateValues === undefined) {
+      return;
+    }
+    const offset = this.eidPredicateIndex.byteOffset(eidId);
+    const predicateOffset = this.eidPredicateIndex.readU32At(offset);
+    const predicateLength = this.eidPredicateIndex.readU32At(offset + 4);
+    for (let index = 0; index < predicateLength; index += 1) {
+      const predicateRecordOffset = this.eidPredicateValues.byteOffset(
+        predicateOffset + index,
+      );
+      yield {
+        pid: this.eidPredicateValues.readU32At(predicateRecordOffset),
+        valueQidNumber: this.eidPredicateValues.readU32At(
+          predicateRecordOffset + 4,
+        ),
+      };
+    }
   }
 }
 
@@ -332,6 +407,24 @@ function hasLegacyQidTables(manifest: RuntimeManifest): manifest is RuntimeManif
   );
 }
 
+function hasEntityFactTables(manifest: RuntimeManifest): manifest is RuntimeManifest & {
+  eid_predicate_index_record_bytes: number;
+  eid_predicate_value_record_bytes: number;
+  files: RuntimeManifest["files"] & {
+    eid_flags: string;
+    eid_predicate_index: string;
+    eid_predicate_values: string;
+  };
+} {
+  return (
+    manifest.eid_predicate_index_record_bytes !== undefined &&
+    manifest.eid_predicate_value_record_bytes !== undefined &&
+    manifest.files.eid_flags !== undefined &&
+    manifest.files.eid_predicate_index !== undefined &&
+    manifest.files.eid_predicate_values !== undefined
+  );
+}
+
 function readRuntimeManifest(rootDir: string): RuntimeManifest {
   return JSON.parse(readFileSync(join(rootDir, "manifest.json"), "utf8")) as RuntimeManifest;
 }
@@ -357,6 +450,18 @@ function validateManifest(manifest: RuntimeManifest): void {
       throw new Error(
         `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`,
       );
+    }
+    if (hasEntityFactTables(manifest)) {
+      if (manifest.eid_predicate_index_record_bytes !== 8) {
+        throw new Error(
+          `unsupported EID predicate index record size: ${manifest.eid_predicate_index_record_bytes}`,
+        );
+      }
+      if (manifest.eid_predicate_value_record_bytes !== 8) {
+        throw new Error(
+          `unsupported EID predicate value record size: ${manifest.eid_predicate_value_record_bytes}`,
+        );
+      }
     }
     return;
   }
