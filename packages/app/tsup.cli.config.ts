@@ -9,7 +9,7 @@ export default defineConfig({
   entry: {
     "wikipage-spine": "src/cli/main.ts",
   },
-  format: ["esm"],
+  format: ["cjs"],
   outDir: "bin",
   sourcemap: true,
   splitting: false,

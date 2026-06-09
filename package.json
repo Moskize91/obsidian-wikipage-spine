@@ -13,6 +13,7 @@
     "build:cli": "npm run build:cli --workspace=wikipage-spine",
     "prepare:plugin": "npm run prepare:plugin --workspace=wikipage-spine",
     "install:plugin": "npm run install:plugin --workspace=wikipage-spine",
+    "install:local": "npm run install:local --workspace=wikipage-spine",
     "test": "npm run test --workspace=wikipage-spine",
     "test:coverage": "npm run test:coverage --workspace=wikipage-spine",
     "typecheck": "npm run typecheck --workspace=wikipage-spine",
