@@ -4,12 +4,14 @@ import { join } from "node:path";
 const ROOT_STATE_ID = 0;
 const INVALID_CODE = 0xffffffff;
 
-export interface RuntimeDatasetOptions {
+export interface SurfaceMatcherOptions {
   stateCacheBlocks?: number;
   outputCacheBlocks?: number;
   qidCacheBlocks?: number;
   mapCacheBlocks?: number;
   blockBytes?: number;
+  captureSurface?: boolean;
+  captureWindowUtf16?: number;
 }
 
 export interface RuntimeManifest {
@@ -32,7 +34,7 @@ export interface RuntimeManifest {
   };
 }
 
-export interface RuntimeMatch {
+export interface SurfaceMatch {
   start: number;
   end: number;
   utf16Length: number;
@@ -40,11 +42,6 @@ export interface RuntimeMatch {
   surfaceId: number;
   qids: string[];
   qidNumbers: number[];
-}
-
-export interface ScanOptions {
-  captureSurface?: boolean;
-  captureWindowUtf16?: number;
 }
 
 interface StateRecord {
@@ -60,7 +57,7 @@ interface OutputRecord {
   parentOutputPos: number;
 }
 
-export class RuntimeDataset {
+export class SurfaceMatcher {
   readonly rootDir: string;
   readonly manifest: RuntimeManifest;
 
@@ -69,19 +66,23 @@ export class RuntimeDataset {
   private readonly stateOutputs: RecordTable;
   private readonly qidIndex: RecordTable;
   private readonly qidValues: U32Table;
+  private readonly captureSurface: boolean;
+  private readonly captureWindowUtf16: number;
 
   static exists(rootDir: string): boolean {
     return existsSync(join(rootDir, "manifest.json"));
   }
 
-  static open(rootDir: string, options: RuntimeDatasetOptions = {}): RuntimeDataset {
-    return new RuntimeDataset(rootDir, options);
+  static open(rootDir: string, options: SurfaceMatcherOptions = {}): SurfaceMatcher {
+    return new SurfaceMatcher(rootDir, options);
   }
 
-  private constructor(rootDir: string, options: RuntimeDatasetOptions) {
+  private constructor(rootDir: string, options: SurfaceMatcherOptions) {
     this.rootDir = rootDir;
     this.manifest = readRuntimeManifest(rootDir);
     validateManifest(this.manifest);
+    this.captureSurface = options.captureSurface ?? true;
+    this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
 
     const blockBytes = options.blockBytes ?? 64 * 1024;
     this.charCodeMap = new U32Table(
@@ -114,13 +115,7 @@ export class RuntimeDataset {
     );
   }
 
-  *scanText(text: string): Generator<RuntimeMatch> {
-    yield* this.scan([text], { captureSurface: true, captureWindowUtf16: text.length });
-  }
-
-  *scan(chunks: Iterable<string>, options: ScanOptions = {}): Generator<RuntimeMatch> {
-    const captureSurface = options.captureSurface ?? true;
-    const captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
+  *scan(chunks: Iterable<string>): Generator<SurfaceMatch> {
     let stateId = ROOT_STATE_ID;
     let end = 0;
     let recentText = "";
@@ -130,10 +125,10 @@ export class RuntimeDataset {
       stateId = this.nextStateId(stateId, char.codePointAt(0) ?? 0);
       end += char.length;
 
-      if (captureSurface) {
+      if (this.captureSurface) {
         recentText += char;
-        if (recentText.length > captureWindowUtf16) {
-          const excess = recentText.length - captureWindowUtf16;
+        if (recentText.length > this.captureWindowUtf16) {
+          const excess = recentText.length - this.captureWindowUtf16;
           recentText = recentText.slice(excess);
           recentStart += excess;
         }
@@ -144,10 +139,10 @@ export class RuntimeDataset {
         const start = end - output.utf16Length;
         const qidNumbers = this.readQidNumbers(output.surfaceId);
         const surface =
-          captureSurface && start >= recentStart
+          this.captureSurface && start >= recentStart
             ? recentText.slice(start - recentStart, end - recentStart)
             : undefined;
-        const match: RuntimeMatch = {
+        const match: SurfaceMatch = {
           start,
           end,
           utf16Length: output.utf16Length,
@@ -163,8 +158,8 @@ export class RuntimeDataset {
     }
   }
 
-  scanCharacters(chars: Iterable<string>, options: ScanOptions = {}): Generator<RuntimeMatch> {
-    return this.scan(chars, options);
+  scanCharacters(chars: Iterable<string>): Generator<SurfaceMatch> {
+    return this.scan(chars);
   }
 
   close(): void {

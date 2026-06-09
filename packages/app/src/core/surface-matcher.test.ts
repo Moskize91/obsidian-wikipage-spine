@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RuntimeDataset } from "./runtime-dataset";
+import { SurfaceMatcher } from "./surface-matcher";
 
 const runtimeDir = resolve(__dirname, "../../../../crates/data/runtime");
 
@@ -26,8 +26,8 @@ const articleNotes = [
   },
 ] as const;
 
-describe("RuntimeDataset", () => {
-  const opened: RuntimeDataset[] = [];
+describe("SurfaceMatcher", () => {
+  const opened: SurfaceMatcher[] = [];
 
   afterEach(() => {
     while (opened.length > 0) {
@@ -36,16 +36,16 @@ describe("RuntimeDataset", () => {
   });
 
   it.skipIf(!existsSync(runtimeDir))("scans article-style notes from runtime tables", () => {
-    const dataset = RuntimeDataset.open(runtimeDir, {
+    const matcher = SurfaceMatcher.open(runtimeDir, {
       stateCacheBlocks: 8,
       outputCacheBlocks: 4,
       qidCacheBlocks: 4,
       mapCacheBlocks: 1,
     });
-    opened.push(dataset);
+    opened.push(matcher);
 
     for (const note of articleNotes) {
-      const matches = [...dataset.scanText(note.text)];
+      const matches = [...matcher.scan([note.text])];
       for (const surface of note.surfaces) {
         expect(
           matches.some((match) => match.surface === surface && match.qids.length > 0),
@@ -58,33 +58,51 @@ describe("RuntimeDataset", () => {
   });
 
   it.skipIf(!existsSync(runtimeDir))("keeps state across chunked input", () => {
-    const dataset = RuntimeDataset.open(runtimeDir, {
+    const matcher = SurfaceMatcher.open(runtimeDir, {
       stateCacheBlocks: 1,
       outputCacheBlocks: 1,
       qidCacheBlocks: 1,
       mapCacheBlocks: 1,
     });
-    opened.push(dataset);
+    opened.push(matcher);
 
     const chunks = ["我", "曾", "就", "读", "于", "北", "京", "大", "学", "。"];
-    const matches = [...dataset.scan(chunks)];
+    const matches = [...matcher.scan(chunks)];
 
     expect(matches.some((match) => match.surface === "北京大学" && match.qids.length > 0)).toBe(
       true,
     );
   });
 
+  it.skipIf(!existsSync(runtimeDir))("uses constructor scan capture options", () => {
+    const matcher = SurfaceMatcher.open(runtimeDir, {
+      stateCacheBlocks: 8,
+      outputCacheBlocks: 4,
+      qidCacheBlocks: 4,
+      mapCacheBlocks: 1,
+      captureWindowUtf16: 2,
+    });
+    opened.push(matcher);
+
+    const matches = [...matcher.scan(["我曾就读于北京大学。"])];
+    const beijingUniversity = matches.find(
+      (match) => match.end === 9 && match.utf16Length === 4 && match.qids.length > 0,
+    );
+
+    expect(beijingUniversity?.surface).toBeUndefined();
+  });
+
   it.skipIf(!existsSync(runtimeDir))("scans English aliases from runtime tables", () => {
-    const dataset = RuntimeDataset.open(runtimeDir, {
+    const matcher = SurfaceMatcher.open(runtimeDir, {
       stateCacheBlocks: 8,
       outputCacheBlocks: 4,
       qidCacheBlocks: 4,
       mapCacheBlocks: 1,
     });
-    opened.push(dataset);
+    opened.push(matcher);
 
     const text = "Alan Turing worked on Computer science and Artificial intelligence.";
-    const matches = [...dataset.scanText(text)];
+    const matches = [...matcher.scan([text])];
 
     expect(matches.some((match) => match.surface === "Alan Turing" && match.qids.length > 0)).toBe(
       true,
