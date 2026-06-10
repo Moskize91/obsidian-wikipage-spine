@@ -1,43 +1,46 @@
-export interface EntityPredicateFact {
-  pid: number;
-  valueQidNumber: number;
+export interface EntityColorValue {
+  anchorId: number;
+  distance: number;
 }
 
 export const ENTITY_FLAG_DISAMBIGUATION = 1;
 
-const POSITIVE_PREDICATES = new Set<number>([
-  69, // educated at
-  106, // occupation
-  108, // employer
-  112, // founded by
-  178, // developer
-  212, // ISBN-13
-  356, // DOI
-  496, // ORCID iD
-  569, // date of birth
-  570, // date of death
-  571, // inception
-  577, // publication date
-  698, // PubMed ID
-  800, // notable work
-  932, // PMCID
-  957, // ISBN-10
+const POSITIVE_ANCHOR_IDS = new Set<number>([
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
 ]);
+
+const NEGATIVE_ANCHOR_IDS = new Set<number>([
+  15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+]);
+
+const MAX_POSITIVE_DISTANCE = 4;
+const MAX_NEGATIVE_DISTANCE = 2;
 
 export function shouldReportEntity(input: {
   flags: number;
-  predicates: Iterable<EntityPredicateFact>;
+  colors: Iterable<EntityColorValue>;
 }): boolean {
   if ((input.flags & ENTITY_FLAG_DISAMBIGUATION) !== 0) {
     return false;
   }
 
-  for (const predicate of input.predicates) {
-    if (POSITIVE_PREDICATES.has(predicate.pid)) {
-      return true;
+  let hasPositive = false;
+  for (const color of input.colors) {
+    if (
+      NEGATIVE_ANCHOR_IDS.has(color.anchorId) &&
+      color.distance <= MAX_NEGATIVE_DISTANCE
+    ) {
+      return false;
+    }
+    if (
+      POSITIVE_ANCHOR_IDS.has(color.anchorId) &&
+      color.distance > 0 &&
+      color.distance <= MAX_POSITIVE_DISTANCE
+    ) {
+      hasPositive = true;
     }
   }
 
-  // 第一版宁愿漏掉大多数普通实体，也不让泛权威 ID、P31/P279 或短 surface 误召重新污染正文。
-  return false;
+  // 色卡没有命中正向锚点时，当前 sync 不自动写入；后续 investigate 通道会处理孤立实体。
+  return hasPositive;
 }

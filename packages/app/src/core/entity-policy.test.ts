@@ -9,52 +9,67 @@ describe("entity policy", () => {
     expect(
       shouldReportEntity({
         flags: ENTITY_FLAG_DISAMBIGUATION,
-        predicates: [{ pid: 31, valueQidNumber: 4167410 }],
+        colors: [{ anchorId: 15, distance: 1 }],
       }),
     ).toBe(false);
   });
 
-  it("reports entities with narrow professional predicates", () => {
+  it("reports entities near positive anchors", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        predicates: [{ pid: 356, valueQidNumber: 0 }],
+        colors: [{ anchorId: 1, distance: 2 }],
       }),
     ).toBe(true);
   });
 
-  it("reports entities with selected candidate predicates", () => {
+  it("does not report anchor entities themselves", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        predicates: [{ pid: 106, valueQidNumber: 0 }],
+        colors: [{ anchorId: 1, distance: 0 }],
+      }),
+    ).toBe(false);
+  });
+
+  it("suppresses entities near negative anchors", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [
+          { anchorId: 1, distance: 2 },
+          { anchorId: 18, distance: 1 },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores distant negative anchors", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [
+          { anchorId: 1, distance: 2 },
+          { anchorId: 18, distance: 5 },
+        ],
       }),
     ).toBe(true);
   });
 
-  it("suppresses broad authority identifiers", () => {
+  it("does not auto-report entities without positive color evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        predicates: [{ pid: 646, valueQidNumber: 0 }],
+        colors: [],
       }),
     ).toBe(false);
   });
 
-  it("suppresses plain instance-of evidence", () => {
+  it("does not auto-report entities whose positive anchors are too distant", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        predicates: [{ pid: 31, valueQidNumber: 5 }],
-      }),
-    ).toBe(false);
-  });
-
-  it("suppresses entities without positive predicate evidence", () => {
-    expect(
-      shouldReportEntity({
-        flags: 0,
-        predicates: [{ pid: 999999, valueQidNumber: 999998 }],
+        colors: [{ anchorId: 1, distance: 5 }],
       }),
     ).toBe(false);
   });

@@ -5,7 +5,7 @@ mod compact_ac;
 
 use crate::compact_ac::{CharwiseDoubleArrayAhoCorasickBuilder, DoubleArrayAhoCorasickBuilder};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -79,7 +79,12 @@ impl Default for DownloadArgs {
         Self {
             out: PathBuf::from("crates/data/dumps"),
             wikis: vec!["zhwiki".to_string(), "enwiki".to_string()],
-            components: vec![Component::Page, Component::Redirect, Component::PageProps],
+            components: vec![
+                Component::Page,
+                Component::Redirect,
+                Component::PageProps,
+                Component::WikidataEntities,
+            ],
             date: "latest".to_string(),
             dry_run: false,
             force: false,
@@ -218,10 +223,135 @@ struct SurfaceRow {
 }
 
 #[derive(Clone, Debug, Default)]
-struct EntityFact {
+struct EntityTypeEdges {
     flags: u32,
-    predicates: Vec<(u32, u32)>,
+    type_targets: Vec<u32>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnchorPolarity {
+    Positive,
+    Negative,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EntityColorAnchor {
+    qid: u32,
+    polarity: AnchorPolarity,
+}
+
+const ENTITY_COLOR_MAX_DISTANCE: u8 = 6;
+
+const ENTITY_COLOR_ANCHORS: &[EntityColorAnchor] = &[
+    EntityColorAnchor {
+        qid: 5,
+        polarity: AnchorPolarity::Positive,
+    }, // human
+    EntityColorAnchor {
+        qid: 11862829,
+        polarity: AnchorPolarity::Positive,
+    }, // academic discipline
+    EntityColorAnchor {
+        qid: 1047113,
+        polarity: AnchorPolarity::Positive,
+    }, // specialty
+    EntityColorAnchor {
+        qid: 4671286,
+        polarity: AnchorPolarity::Positive,
+    }, // academic major
+    EntityColorAnchor {
+        qid: 23847174,
+        polarity: AnchorPolarity::Positive,
+    }, // religious concept
+    EntityColorAnchor {
+        qid: 33104279,
+        polarity: AnchorPolarity::Positive,
+    }, // philosophical concept
+    EntityColorAnchor {
+        qid: 1387659,
+        polarity: AnchorPolarity::Positive,
+    }, // school of thought
+    EntityColorAnchor {
+        qid: 1969448,
+        polarity: AnchorPolarity::Positive,
+    }, // term
+    EntityColorAnchor {
+        qid: 12812139,
+        polarity: AnchorPolarity::Positive,
+    }, // technical term
+    EntityColorAnchor {
+        qid: 179461,
+        polarity: AnchorPolarity::Positive,
+    }, // religious text
+    EntityColorAnchor {
+        qid: 732577,
+        polarity: AnchorPolarity::Positive,
+    }, // publication
+    EntityColorAnchor {
+        qid: 47461344,
+        polarity: AnchorPolarity::Positive,
+    }, // written work
+    EntityColorAnchor {
+        qid: 7725634,
+        polarity: AnchorPolarity::Positive,
+    }, // literary work
+    EntityColorAnchor {
+        qid: 43229,
+        polarity: AnchorPolarity::Positive,
+    }, // organization
+    EntityColorAnchor {
+        qid: 3918,
+        polarity: AnchorPolarity::Positive,
+    }, // university
+    EntityColorAnchor {
+        qid: 4167410,
+        polarity: AnchorPolarity::Negative,
+    }, // Wikimedia disambiguation page
+    EntityColorAnchor {
+        qid: 82042,
+        polarity: AnchorPolarity::Negative,
+    }, // part of speech
+    EntityColorAnchor {
+        qid: 2374489,
+        polarity: AnchorPolarity::Negative,
+    }, // grammeme
+    EntityColorAnchor {
+        qid: 11953984,
+        polarity: AnchorPolarity::Negative,
+    }, // linguistic unit
+    EntityColorAnchor {
+        qid: 48937186,
+        polarity: AnchorPolarity::Negative,
+    }, // word
+    EntityColorAnchor {
+        qid: 3695082,
+        polarity: AnchorPolarity::Negative,
+    }, // sign
+    EntityColorAnchor {
+        qid: 80071,
+        polarity: AnchorPolarity::Negative,
+    }, // punctuation mark
+    EntityColorAnchor {
+        qid: 21146257,
+        polarity: AnchorPolarity::Negative,
+    }, // type
+    EntityColorAnchor {
+        qid: 16889133,
+        polarity: AnchorPolarity::Negative,
+    }, // class
+    EntityColorAnchor {
+        qid: 133449656,
+        polarity: AnchorPolarity::Negative,
+    }, // type of work
+    EntityColorAnchor {
+        qid: 108586636,
+        polarity: AnchorPolarity::Negative,
+    }, // type of event
+    EntityColorAnchor {
+        qid: 116505632,
+        polarity: AnchorPolarity::Negative,
+    }, // type of process
+];
 
 fn parse_download_args(raw_args: Vec<String>) -> Result<DownloadArgs> {
     let mut args = DownloadArgs::default();
@@ -518,19 +648,15 @@ fn preprocess(args: ProcessArgs) -> Result<()> {
 
     let surface_qid_numbers = collect_surface_qid_numbers(&surface_qids)?;
     eprintln!(
-        "processing Wikidata entity facts for {} QIDs",
+        "processing Wikidata entity type edges for {} surface QIDs",
         surface_qid_numbers.len()
     );
-    let entity_facts =
-        read_wikidata_entity_facts(&args.dumps, &args.date, &surface_qid_numbers, args.limit)?;
+    let entity_type_edges =
+        read_wikidata_entity_type_edges(&args.dumps, &args.date, &surface_qid_numbers, args.limit)?;
 
     write_surface_sources_tsv(&out_dir.join("surface_sources.tsv"), &all_surfaces)?;
     write_surface_qid_lists_tsv(&out_dir.join("surface_qids.tsv"), &surface_qids)?;
-    write_entity_facts_tsv(
-        &out_dir.join("entity_facts.tsv"),
-        &surface_qid_numbers,
-        &entity_facts,
-    )?;
+    write_entity_type_edges_tsv(&out_dir.join("entity_type_edges.tsv"), &entity_type_edges)?;
     write_preprocess_manifest(&out_dir.join("manifest.json"), &args, &summaries)?;
 
     for summary in summaries {
@@ -654,9 +780,9 @@ struct RuntimeQidStats {
     surface_count: usize,
     surface_eid_value_count: usize,
     eid_count: usize,
-    predicate_value_count: usize,
+    color_value_count: usize,
+    color_anchor_count: usize,
     max_qid: u32,
-    max_pid: u32,
 }
 
 #[derive(Debug)]
@@ -706,7 +832,7 @@ fn postprocess(args: PostprocessArgs) -> Result<()> {
     eprintln!("postprocessing entity tables");
     let (surface_utf16_lengths, qid_stats) = write_runtime_entity_tables(
         &surface_qids_path,
-        &args.preprocess.join("entity_facts.tsv"),
+        &args.preprocess.join("entity_type_edges.tsv"),
         &surfaces_out_dir,
         &eids_out_dir,
         args.progress_every,
@@ -744,12 +870,12 @@ fn postprocess(args: PostprocessArgs) -> Result<()> {
 
 fn write_runtime_entity_tables(
     surface_qids_path: &Path,
-    entity_facts_path: &Path,
+    entity_type_edges_path: &Path,
     surfaces_out_dir: &Path,
     eids_out_dir: &Path,
     progress_every: usize,
 ) -> Result<(Vec<u32>, RuntimeQidStats)> {
-    let entity_facts = read_entity_facts_tsv(entity_facts_path)?;
+    let entity_type_edges = read_entity_type_edges_tsv(entity_type_edges_path)?;
     let mut surface_utf16_lengths = Vec::<u32>::new();
     let mut qid_set = HashSet::<u32>::new();
 
@@ -836,47 +962,98 @@ fn write_runtime_entity_tables(
 
     let mut qid_numbers = BufWriter::new(File::create(eids_out_dir.join("qid_numbers.bin"))?);
     let mut flags = BufWriter::new(File::create(eids_out_dir.join("flags.bin"))?);
-    let mut predicate_index =
-        BufWriter::new(File::create(eids_out_dir.join("predicate_index.bin"))?);
-    let mut predicate_values =
-        BufWriter::new(File::create(eids_out_dir.join("predicate_values.bin"))?);
+    let mut color_index = BufWriter::new(File::create(eids_out_dir.join("color_index.bin"))?);
+    let mut color_values = BufWriter::new(File::create(eids_out_dir.join("color_values.bin"))?);
 
-    let mut predicate_value_count = 0usize;
     let mut max_qid = 0u32;
-    let mut max_pid = 0u32;
+    let color_cards = build_entity_color_cards(&qids, &entity_type_edges)?;
+    let mut color_value_count = 0usize;
     for qid in &qids {
         max_qid = max_qid.max(*qid);
-        let fact = entity_facts.get(qid).cloned().unwrap_or_default();
+        let fact = entity_type_edges.get(qid).cloned().unwrap_or_default();
         write_u32(&mut qid_numbers, *qid)?;
         write_u32(&mut flags, fact.flags)?;
-        let offset = u32::try_from(predicate_value_count)
-            .map_err(|_| CliError("predicate value offset overflowed u32".to_string()))?;
-        let length = u32::try_from(fact.predicates.len())
-            .map_err(|_| CliError("predicate list length overflowed u32".to_string()))?;
-        write_u32(&mut predicate_index, offset)?;
-        write_u32(&mut predicate_index, length)?;
-        for (pid, value_qid) in fact.predicates {
-            max_pid = max_pid.max(pid);
-            max_qid = max_qid.max(value_qid);
-            write_u32(&mut predicate_values, pid)?;
-            write_u32(&mut predicate_values, value_qid)?;
-            predicate_value_count += 1;
+        let card = color_cards.get(qid).map(Vec::as_slice).unwrap_or(&[]);
+        let offset = u32::try_from(color_value_count)
+            .map_err(|_| CliError("color value offset overflowed u32".to_string()))?;
+        let length = u32::try_from(card.len())
+            .map_err(|_| CliError("color card length overflowed u32".to_string()))?;
+        write_u32(&mut color_index, offset)?;
+        write_u32(&mut color_index, length)?;
+        for &(anchor_id, distance) in card {
+            write_u32(&mut color_values, u32::from(anchor_id))?;
+            write_u32(&mut color_values, u32::from(distance))?;
+            color_value_count += 1;
         }
     }
     qid_numbers.flush()?;
     flags.flush()?;
-    predicate_index.flush()?;
-    predicate_values.flush()?;
+    color_index.flush()?;
+    color_values.flush()?;
 
     let stats = RuntimeQidStats {
         surface_count: surface_utf16_lengths.len(),
         surface_eid_value_count,
         eid_count: qids.len(),
-        predicate_value_count,
+        color_value_count,
+        color_anchor_count: ENTITY_COLOR_ANCHORS.len(),
         max_qid,
-        max_pid,
     };
     Ok((surface_utf16_lengths, stats))
+}
+
+fn build_entity_color_cards(
+    runtime_qids: &[u32],
+    entity_type_edges: &HashMap<u32, EntityTypeEdges>,
+) -> Result<HashMap<u32, Vec<(u16, u8)>>> {
+    let runtime_qid_set = runtime_qids.iter().copied().collect::<HashSet<_>>();
+    let mut reverse_edges = HashMap::<u32, Vec<u32>>::new();
+    for (&source_qid, fact) in entity_type_edges {
+        for &target_qid in &fact.type_targets {
+            reverse_edges
+                .entry(target_qid)
+                .or_default()
+                .push(source_qid);
+        }
+    }
+    for sources in reverse_edges.values_mut() {
+        sources.sort_unstable();
+        sources.dedup();
+    }
+
+    let mut color_cards = HashMap::<u32, Vec<(u16, u8)>>::new();
+    for (anchor_index, anchor) in ENTITY_COLOR_ANCHORS.iter().enumerate() {
+        let anchor_id = u16::try_from(anchor_index)
+            .map_err(|_| CliError("entity color anchor id overflowed u16".to_string()))?;
+        let mut visited = HashSet::<u32>::new();
+        let mut frontier = VecDeque::<(u32, u8)>::new();
+        visited.insert(anchor.qid);
+        frontier.push_back((anchor.qid, 0));
+
+        while let Some((qid, distance)) = frontier.pop_front() {
+            if runtime_qid_set.contains(&qid) {
+                color_cards
+                    .entry(qid)
+                    .or_default()
+                    .push((anchor_id, distance));
+            }
+            if distance >= ENTITY_COLOR_MAX_DISTANCE {
+                continue;
+            }
+            if let Some(sources) = reverse_edges.get(&qid) {
+                for &source_qid in sources {
+                    if visited.insert(source_qid) {
+                        frontier.push_back((source_qid, distance + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    for card in color_cards.values_mut() {
+        card.sort_unstable();
+    }
+    Ok(color_cards)
 }
 
 fn write_runtime_automaton_tables(
@@ -997,8 +1174,8 @@ fn write_runtime_manifest(
     writeln!(file, "  \"state_record_bytes\": 16,")?;
     writeln!(file, "  \"state_output_record_bytes\": 12,")?;
     writeln!(file, "  \"surface_eid_index_record_bytes\": 8,")?;
-    writeln!(file, "  \"eid_predicate_index_record_bytes\": 8,")?;
-    writeln!(file, "  \"eid_predicate_value_record_bytes\": 8,")?;
+    writeln!(file, "  \"eid_color_index_record_bytes\": 8,")?;
+    writeln!(file, "  \"eid_color_value_record_bytes\": 8,")?;
     writeln!(file, "  \"states_len\": {},", automaton_stats.states_len)?;
     writeln!(file, "  \"num_states\": {},", automaton_stats.num_states)?;
     writeln!(
@@ -1025,11 +1202,38 @@ fn write_runtime_manifest(
     writeln!(file, "  \"eid_count\": {},", qid_stats.eid_count)?;
     writeln!(
         file,
-        "  \"eid_predicate_value_count\": {},",
-        qid_stats.predicate_value_count
+        "  \"eid_color_value_count\": {},",
+        qid_stats.color_value_count
     )?;
+    writeln!(
+        file,
+        "  \"entity_color_anchor_count\": {},",
+        qid_stats.color_anchor_count
+    )?;
+    writeln!(
+        file,
+        "  \"entity_color_max_distance\": {},",
+        ENTITY_COLOR_MAX_DISTANCE
+    )?;
+    writeln!(file, "  \"entity_color_anchors\": [")?;
+    for (index, anchor) in ENTITY_COLOR_ANCHORS.iter().enumerate() {
+        let comma = if index + 1 == ENTITY_COLOR_ANCHORS.len() {
+            ""
+        } else {
+            ","
+        };
+        let polarity = match anchor.polarity {
+            AnchorPolarity::Positive => "positive",
+            AnchorPolarity::Negative => "negative",
+        };
+        writeln!(
+            file,
+            "    {{ \"qid\": \"Q{}\", \"polarity\": \"{}\" }}{}",
+            anchor.qid, polarity, comma
+        )?;
+    }
+    writeln!(file, "  ],")?;
     writeln!(file, "  \"max_qid\": {},", qid_stats.max_qid)?;
-    writeln!(file, "  \"max_pid\": {},", qid_stats.max_pid)?;
     writeln!(
         file,
         "  \"source_automaton_bytes\": {},",
@@ -1055,14 +1259,8 @@ fn write_runtime_manifest(
     )?;
     writeln!(file, "    \"eid_qid_numbers\": \"eids/qid_numbers.bin\",")?;
     writeln!(file, "    \"eid_flags\": \"eids/flags.bin\",")?;
-    writeln!(
-        file,
-        "    \"eid_predicate_index\": \"eids/predicate_index.bin\","
-    )?;
-    writeln!(
-        file,
-        "    \"eid_predicate_values\": \"eids/predicate_values.bin\""
-    )?;
+    writeln!(file, "    \"eid_color_index\": \"eids/color_index.bin\",")?;
+    writeln!(file, "    \"eid_color_values\": \"eids/color_values.bin\"")?;
     writeln!(file, "  }}")?;
     writeln!(file, "}}")?;
     Ok(())
@@ -1096,11 +1294,11 @@ fn parse_surface_qids_row(line: &str, line_number: usize) -> Result<(String, Vec
     Ok((surface_key, qids, qid_count))
 }
 
-fn read_entity_facts_tsv(path: &Path) -> Result<HashMap<u32, EntityFact>> {
+fn read_entity_type_edges_tsv(path: &Path) -> Result<HashMap<u32, EntityTypeEdges>> {
     let mut facts = HashMap::new();
     if !path.exists() {
         eprintln!(
-            "missing preprocess file {}; using empty entity facts",
+            "missing preprocess file {}; using empty entity type edges",
             path.display()
         );
         return Ok(facts);
@@ -1108,16 +1306,16 @@ fn read_entity_facts_tsv(path: &Path) -> Result<HashMap<u32, EntityFact>> {
     for (line_number, line) in BufReader::new(File::open(path)?).lines().enumerate() {
         let line = line?;
         if line_number == 0 {
-            validate_entity_facts_header(&line)?;
+            validate_entity_type_edges_header(&line)?;
             continue;
         }
-        let (qid, fact) = parse_entity_facts_row(&line, line_number + 1)?;
+        let (qid, fact) = parse_entity_type_edges_row(&line, line_number + 1)?;
         facts.insert(qid, fact);
     }
     Ok(facts)
 }
 
-fn parse_entity_facts_row(line: &str, line_number: usize) -> Result<(u32, EntityFact)> {
+fn parse_entity_type_edges_row(line: &str, line_number: usize) -> Result<(u32, EntityTypeEdges)> {
     let mut parts = line.splitn(4, '\t');
     let qid = parts
         .next()
@@ -1125,62 +1323,59 @@ fn parse_entity_facts_row(line: &str, line_number: usize) -> Result<(u32, Entity
     let flags = parts
         .next()
         .ok_or_else(|| CliError(format!("missing flags at line {line_number}")))?;
-    let predicate_pairs = parts
+    let type_targets = parts
         .next()
-        .ok_or_else(|| CliError(format!("missing predicate_pairs at line {line_number}")))?;
-    let predicate_count = parts
+        .ok_or_else(|| CliError(format!("missing type_targets at line {line_number}")))?;
+    let type_target_count = parts
         .next()
-        .ok_or_else(|| CliError(format!("missing predicate_count at line {line_number}")))?;
+        .ok_or_else(|| CliError(format!("missing type_target_count at line {line_number}")))?;
 
     let qid = parse_qid_number(qid, line_number)?;
     let flags = flags
         .parse::<u32>()
         .map_err(|err| CliError(format!("invalid flags at line {line_number}: {err}")))?;
-    let predicate_count = predicate_count.parse::<usize>().map_err(|err| {
+    let type_target_count = type_target_count.parse::<usize>().map_err(|err| {
         CliError(format!(
-            "invalid predicate_count at line {line_number}: {err}"
+            "invalid type_target_count at line {line_number}: {err}"
         ))
     })?;
-    let predicates = parse_predicate_pairs(&unescape_tsv(predicate_pairs), line_number)?;
-    if predicates.len() != predicate_count {
+    let type_targets = parse_type_targets(&unescape_tsv(type_targets), line_number)?;
+    if type_targets.len() != type_target_count {
         return Err(CliError(format!(
-            "predicate_count mismatch at line {}: parsed {}, declared {}",
+            "type_target_count mismatch at line {}: parsed {}, declared {}",
             line_number,
-            predicates.len(),
-            predicate_count
+            type_targets.len(),
+            type_target_count
         ))
         .into());
     }
-    Ok((qid, EntityFact { flags, predicates }))
+    Ok((
+        qid,
+        EntityTypeEdges {
+            flags,
+            type_targets,
+        },
+    ))
 }
 
-fn parse_predicate_pairs(value: &str, line_number: usize) -> Result<Vec<(u32, u32)>> {
+fn parse_type_targets(value: &str, line_number: usize) -> Result<Vec<u32>> {
     if value.is_empty() {
         return Ok(Vec::new());
     }
     value
         .split('|')
-        .map(|pair| {
-            let (pid, value_qid) = pair.split_once('=').ok_or_else(|| {
-                CliError(format!(
-                    "invalid predicate pair `{pair}` at line {line_number}"
-                ))
-            })?;
-            let pid = pid
-                .strip_prefix('P')
-                .ok_or_else(|| CliError(format!("invalid PID `{pid}` at line {line_number}")))?
-                .parse::<u32>()
-                .map_err(|err| {
-                    CliError(format!(
-                        "PID `{pid}` exceeds runtime u32 encoding at line {line_number}: {err}"
+        .map(|target| {
+            if let Some((_pid, value_qid)) = target.split_once('=') {
+                if value_qid.is_empty() {
+                    return Err(CliError(format!(
+                        "empty type target in legacy pid=value pair `{target}` at line {line_number}"
                     ))
-                })?;
-            let value_qid = if value_qid.is_empty() {
-                0
+                    .into());
+                }
+                parse_qid_number(value_qid, line_number)
             } else {
-                parse_qid_number(value_qid, line_number)?
-            };
-            Ok((pid, value_qid))
+                parse_qid_number(target, line_number)
+            }
         })
         .collect::<Result<Vec<_>>>()
 }
@@ -1283,11 +1478,11 @@ fn validate_surface_qids_header(line: &str) -> Result<()> {
     }
 }
 
-fn validate_entity_facts_header(line: &str) -> Result<()> {
-    if line == "qid\tflags\tpredicate_pairs\tpredicate_count" {
+fn validate_entity_type_edges_header(line: &str) -> Result<()> {
+    if line == "qid\tflags\ttype_targets\ttype_target_count" {
         Ok(())
     } else {
-        Err(CliError(format!("unexpected entity_facts.tsv header: {line}")).into())
+        Err(CliError(format!("unexpected entity_type_edges.tsv header: {line}")).into())
     }
 }
 
@@ -1586,24 +1781,24 @@ fn count_ambiguous_surfaces(surface_qids: &[(String, Vec<String>)]) -> usize {
         .count()
 }
 
-fn read_wikidata_entity_facts(
+fn read_wikidata_entity_type_edges(
     dumps: &Path,
     date: &str,
     qids: &HashSet<u32>,
     limit: Option<usize>,
-) -> Result<HashMap<u32, EntityFact>> {
-    let mut facts = qids
+) -> Result<HashMap<u32, EntityTypeEdges>> {
+    let mut edges = qids
         .iter()
         .copied()
-        .map(|qid| (qid, EntityFact::default()))
+        .map(|qid| (qid, EntityTypeEdges::default()))
         .collect::<HashMap<_, _>>();
     let path = wikidata_entities_dump_path(dumps, date);
     if !path.exists() {
-        eprintln!(
-            "missing Wikidata entities dump {}; writing empty entity facts",
+        return Err(CliError(format!(
+            "missing Wikidata entities dump {}; run `wikipage-spine-dataset-builder download --components wikidata_entities` before preprocess",
             path.display()
-        );
-        return Ok(facts);
+        ))
+        .into());
     }
 
     let mut handled = 0usize;
@@ -1622,11 +1817,10 @@ fn read_wikidata_entity_facts(
         else {
             continue;
         };
-        if !qids.contains(&qid) {
-            continue;
+        let entity_edges = extract_entity_type_edges(&entity);
+        if qids.contains(&qid) || entity_edges.flags != 0 || !entity_edges.type_targets.is_empty() {
+            edges.insert(qid, entity_edges);
         }
-        let fact = extract_entity_fact(&entity);
-        facts.insert(qid, fact);
         handled += 1;
         if let Some(limit) = limit {
             if handled >= limit {
@@ -1634,7 +1828,7 @@ fn read_wikidata_entity_facts(
             }
         }
     }
-    Ok(facts)
+    Ok(edges)
 }
 
 fn open_wikidata_entities_reader(path: &Path) -> Result<Box<dyn BufRead>> {
@@ -1653,33 +1847,40 @@ fn open_wikidata_entities_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(File::open(path)?)))
 }
 
-fn extract_entity_fact(entity: &Value) -> EntityFact {
-    let mut predicates = HashSet::<(u32, u32)>::new();
+fn extract_entity_type_edges(entity: &Value) -> EntityTypeEdges {
+    let mut type_targets = HashSet::<u32>::new();
     if let Some(claims) = entity.get("claims").and_then(Value::as_object) {
         for (pid, claims) in claims {
             let Some(pid) = pid_number_from_str(pid) else {
                 continue;
             };
+            if pid != 31 && pid != 279 {
+                continue;
+            }
             let Some(claims) = claims.as_array() else {
                 continue;
             };
             for claim in claims {
-                let value_qid = claim_value_qid(claim).unwrap_or(0);
-                predicates.insert((pid, value_qid));
+                if let Some(value_qid) = claim_value_qid(claim) {
+                    type_targets.insert(value_qid);
+                }
             }
         }
     }
-    let mut predicates = predicates.into_iter().collect::<Vec<_>>();
-    predicates.sort_unstable();
-    let flags = if predicates
-        .iter()
-        .any(|&(pid, value_qid)| pid == 31 && value_qid == WIKIDATA_DISAMBIGUATION_QID)
+    let mut type_targets = type_targets.into_iter().collect::<Vec<_>>();
+    type_targets.sort_unstable();
+    let flags = if type_targets
+        .binary_search(&WIKIDATA_DISAMBIGUATION_QID)
+        .is_ok()
     {
         ENTITY_FLAG_DISAMBIGUATION
     } else {
         0
     };
-    EntityFact { flags, predicates }
+    EntityTypeEdges {
+        flags,
+        type_targets,
+    }
 }
 
 fn claim_value_qid(claim: &Value) -> Option<u32> {
@@ -1928,27 +2129,17 @@ fn write_surface_qid_lists_tsv(path: &Path, rows: &[(String, Vec<String>)]) -> R
     Ok(())
 }
 
-fn write_entity_facts_tsv(
-    path: &Path,
-    qids: &HashSet<u32>,
-    facts: &HashMap<u32, EntityFact>,
-) -> Result<()> {
+fn write_entity_type_edges_tsv(path: &Path, facts: &HashMap<u32, EntityTypeEdges>) -> Result<()> {
     let mut file = File::create(path)?;
-    let mut qids = qids.iter().copied().collect::<Vec<_>>();
+    let mut qids = facts.keys().copied().collect::<Vec<_>>();
     qids.sort_unstable();
-    writeln!(file, "qid\tflags\tpredicate_pairs\tpredicate_count")?;
+    writeln!(file, "qid\tflags\ttype_targets\ttype_target_count")?;
     for qid in qids {
         let fact = facts.get(&qid).cloned().unwrap_or_default();
         let pairs = fact
-            .predicates
+            .type_targets
             .iter()
-            .map(|(pid, value_qid)| {
-                if *value_qid == 0 {
-                    format!("P{pid}=")
-                } else {
-                    format!("P{pid}=Q{value_qid}")
-                }
-            })
+            .map(|value_qid| format!("Q{value_qid}"))
             .collect::<Vec<_>>();
         writeln!(
             file,
@@ -1989,7 +2180,7 @@ fn write_preprocess_manifest(path: &Path, args: &ProcessArgs, summaries: &[Strin
     writeln!(file, "  \"files\": [")?;
     writeln!(file, "    \"surface_qids.tsv\",")?;
     writeln!(file, "    \"surface_sources.tsv\",")?;
-    writeln!(file, "    \"entity_facts.tsv\"")?;
+    writeln!(file, "    \"entity_type_edges.tsv\"")?;
     writeln!(file, "  ],")?;
     writeln!(file, "  \"summaries\": [")?;
     for (index, summary) in summaries.iter().enumerate() {
@@ -2378,8 +2569,8 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            preprocess_dir.join("entity_facts.tsv"),
-            "qid\tflags\tpredicate_pairs\tpredicate_count\nQ956\t0\tP31=Q515|P17=Q148\t2\nQ3918\t0\tP31=Q875538\t1\nQ13371\t1\tP31=Q4167410\t1\n",
+            preprocess_dir.join("entity_type_edges.tsv"),
+            "qid\tflags\ttype_targets\ttype_target_count\nQ956\t0\tQ515\t1\nQ3918\t0\tQ11862829\t1\nQ13371\t1\tQ4167410\t1\nQ515\t0\tQ56061\t1\nQ11862829\t0\tQ1047113\t1\n",
         )
         .unwrap();
         let automaton = build_automaton_bytes(
@@ -2430,13 +2621,25 @@ mod tests {
         assert_eq!(read_u32_at(&eid_flags, 4), 0);
         assert_eq!(read_u32_at(&eid_flags, 8), ENTITY_FLAG_DISAMBIGUATION);
 
-        let predicate_index = fs::read(runtime_dir.join("eids/predicate_index.bin")).unwrap();
-        assert_eq!(read_u32_at(&predicate_index, 0), 0);
-        assert_eq!(read_u32_at(&predicate_index, 4), 2);
-        assert_eq!(read_u32_at(&predicate_index, 8), 2);
-        assert_eq!(read_u32_at(&predicate_index, 12), 1);
-        assert_eq!(read_u32_at(&predicate_index, 16), 3);
-        assert_eq!(read_u32_at(&predicate_index, 20), 1);
+        let color_index = fs::read(runtime_dir.join("eids/color_index.bin")).unwrap();
+        assert_eq!(read_u32_at(&color_index, 0), 0);
+        assert_eq!(read_u32_at(&color_index, 4), 0);
+        assert_eq!(read_u32_at(&color_index, 8), 0);
+        assert_eq!(read_u32_at(&color_index, 12), 3);
+        assert_eq!(read_u32_at(&color_index, 16), 3);
+        assert_eq!(read_u32_at(&color_index, 20), 1);
+
+        let color_values = fs::read(runtime_dir.join("eids/color_values.bin")).unwrap();
+        let color_values = color_values
+            .chunks_exact(8)
+            .map(|chunk| {
+                (
+                    u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
+                    u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(color_values, vec![(1, 1), (2, 2), (14, 0), (15, 1)]);
 
         let state_outputs = fs::read(runtime_dir.join("automaton/state_outputs.bin")).unwrap();
         let outputs = state_outputs
