@@ -31,13 +31,10 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
     ) {
       const only = cluster.matches[0];
       const eid = only.match.qids[0];
-      if (
-        eid === undefined ||
-        isSingleCjkCharacter(only.text) ||
-        isInsideSegmenterWord(only)
-      ) {
+      if (eid === undefined) {
         continue;
       }
+      const resolvedEid = resolveExpandedEntityMatch(only);
       resolved.push({
         kind: "resolved",
         text: only.text,
@@ -46,28 +43,28 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
         surface: only.match.surface,
         sourceStart: only.sourceStart,
         sourceEnd: only.sourceEnd,
+        wordBoundarySuspect: isWordBoundarySuspect(only),
+        resolved: resolvedEid === eid,
       });
       continue;
     }
 
-    conflicts.push(createMentionConflict(cluster));
+    const conflict = createMentionConflict(cluster);
+    if (conflict !== undefined) {
+      conflicts.push(conflict);
+    }
   }
 
   return { resolved, conflicts };
 }
 
-function isSingleCjkCharacter(text: string): boolean {
-  return Array.from(text).length === 1 && /\p{Script=Han}/u.test(text);
-}
-
-function isInsideSegmenterWord(match: PositionedSurfaceMatch): boolean {
+function isWordBoundarySuspect(match: PositionedSurfaceMatch): boolean {
   if (!needsSegmenterBoundaryCheck(match.text)) {
     return false;
   }
 
   const boundaries = wordBoundaries(match.segment.text);
-  // 自动写回必须尊重当前文本的自然词边界，否则会把“Spade”里的“Spa”、
-  // “其中有”里的“中有”这类切片误召唤为实体；这些候选仍可留给后续调查通道。
+  // 词边界只提供弱判定：子串切片非常可疑，但外部消歧可以显式覆盖这个判断。
   return !boundaries.has(match.match.start) || !boundaries.has(match.match.end);
 }
 
@@ -134,7 +131,9 @@ function clusterSurfaceMatches(
   return clusters;
 }
 
-function createMentionConflict(cluster: MatchCluster): MentionConflict {
+function createMentionConflict(
+  cluster: MatchCluster,
+): MentionConflict | undefined {
   const text = sliceSegmentChars(
     cluster.segment,
     cluster.segmentStart,
@@ -150,7 +149,8 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
     cluster.segmentEnd,
     "right",
   );
-  const matches = cluster.matches.map((match) => {
+  const matches = cluster.matches.flatMap((match) => {
+    const wordBoundarySuspect = isWordBoundarySuspect(match);
     const conflictMatch = {
       text: match.text,
       surfaceId: match.match.surfaceId,
@@ -158,12 +158,18 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
       sourceStart: match.sourceStart,
       sourceEnd: match.sourceEnd,
       eids: match.match.qids,
+      wordBoundarySuspect,
     };
     const resolvedEid = resolveExpandedEntityMatch(match);
-    return resolvedEid === undefined
-      ? conflictMatch
-      : { ...conflictMatch, resolvedEid };
+    if (resolvedEid !== undefined) {
+      return [{ ...conflictMatch, resolvedEid }];
+    }
+    // 词边界判定是弱过滤：默认不让可疑切片参与冲突，但显式 resolved 可以覆盖。
+    return wordBoundarySuspect ? [] : [conflictMatch];
   });
+  if (matches.length === 0) {
+    return undefined;
+  }
   const hash = createConflictHash({
     text,
     leftContext,

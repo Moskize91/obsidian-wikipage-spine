@@ -642,12 +642,16 @@ function renderReplacement(replacement, seenEids, options) {
 }
 function selectLinkReplacements(mentions) {
   const replacements = [
-    ...mentions.resolved.map((mention) => ({
-      sourceStart: mention.sourceStart,
-      sourceEnd: mention.sourceEnd,
-      text: mention.text,
-      eid: mention.eid
-    })),
+    ...mentions.resolved.flatMap(
+      (mention) => mention.wordBoundarySuspect && !mention.resolved ? [] : [
+        {
+          sourceStart: mention.sourceStart,
+          sourceEnd: mention.sourceEnd,
+          text: mention.text,
+          eid: mention.eid
+        }
+      ]
+    ),
     ...mentions.conflicts.flatMap((conflict) => conflictReplacements(conflict))
   ];
   return selectNonOverlapping(replacements).sort(
@@ -841,9 +845,10 @@ function buildMentions(matches) {
     if (cluster.matches.length === 1 && cluster.matches[0]?.match.qids.length === 1) {
       const only = cluster.matches[0];
       const eid = only.match.qids[0];
-      if (eid === void 0 || isSingleCjkCharacter(only.text) || isInsideSegmenterWord(only)) {
+      if (eid === void 0) {
         continue;
       }
+      const resolvedEid = resolveExpandedEntityMatch(only);
       resolved.push({
         kind: "resolved",
         text: only.text,
@@ -851,18 +856,20 @@ function buildMentions(matches) {
         surfaceId: only.match.surfaceId,
         surface: only.match.surface,
         sourceStart: only.sourceStart,
-        sourceEnd: only.sourceEnd
+        sourceEnd: only.sourceEnd,
+        wordBoundarySuspect: isWordBoundarySuspect(only),
+        resolved: resolvedEid === eid
       });
       continue;
     }
-    conflicts.push(createMentionConflict(cluster));
+    const conflict = createMentionConflict(cluster);
+    if (conflict !== void 0) {
+      conflicts.push(conflict);
+    }
   }
   return { resolved, conflicts };
 }
-function isSingleCjkCharacter(text) {
-  return Array.from(text).length === 1 && new RegExp("\\p{Script=Han}", "u").test(text);
-}
-function isInsideSegmenterWord(match) {
+function isWordBoundarySuspect(match) {
   if (!needsSegmenterBoundaryCheck(match.text)) {
     return false;
   }
@@ -922,18 +929,26 @@ function createMentionConflict(cluster) {
     cluster.segmentEnd,
     "right"
   );
-  const matches = cluster.matches.map((match) => {
+  const matches = cluster.matches.flatMap((match) => {
+    const wordBoundarySuspect = isWordBoundarySuspect(match);
     const conflictMatch = {
       text: match.text,
       surfaceId: match.match.surfaceId,
       surface: match.match.surface,
       sourceStart: match.sourceStart,
       sourceEnd: match.sourceEnd,
-      eids: match.match.qids
+      eids: match.match.qids,
+      wordBoundarySuspect
     };
     const resolvedEid = resolveExpandedEntityMatch(match);
-    return resolvedEid === void 0 ? conflictMatch : { ...conflictMatch, resolvedEid };
+    if (resolvedEid !== void 0) {
+      return [{ ...conflictMatch, resolvedEid }];
+    }
+    return wordBoundarySuspect ? [] : [conflictMatch];
   });
+  if (matches.length === 0) {
+    return void 0;
+  }
   const hash = createConflictHash({
     text,
     leftContext,
@@ -1554,6 +1569,10 @@ var init_schema = __esm({
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
+    resolved INTEGER NOT NULL DEFAULT 0
+      CHECK (resolved IN (0, 1)),
     created_at_unix_ms INTEGER NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
@@ -1584,6 +1603,8 @@ var init_schema = __esm({
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
     candidate_eids_json TEXT NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
   )`,
@@ -1619,7 +1640,9 @@ function entityLinkTargetForEid(entityDir, eid) {
 }
 function collectMentionEids(mentions) {
   return [
-    ...mentions.resolved.map((mention) => mention.eid),
+    ...mentions.resolved.flatMap(
+      (mention) => mention.wordBoundarySuspect && !mention.resolved ? [] : [mention.eid]
+    ),
     ...mentions.conflicts.flatMap(
       (conflict) => conflict.matches.flatMap(
         (match) => match.resolvedEid === void 0 ? [] : [match.resolvedEid]
@@ -1726,6 +1749,7 @@ function recomputeEntityRefCountsSql() {
   return `UPDATE entities SET ref_count = (
     SELECT COUNT(*) FROM note_mentions
     WHERE note_mentions.eid = entities.eid
+      AND (note_mentions.word_boundary_suspect = 0 OR note_mentions.resolved = 1)
   ) + (
     SELECT COUNT(*) FROM note_mention_conflict_matches
     WHERE note_mention_conflict_matches.resolved_eid = entities.eid
@@ -1866,7 +1890,8 @@ var init_model_store = __esm({
         for (const mention of mentions.resolved) {
           statements.push(sql`INSERT INTO note_mentions (
         note_id, entity_id, eid, text, surface_id, surface,
-        source_start, source_end, created_at_unix_ms, updated_at_unix_ms
+        source_start, source_end, word_boundary_suspect, resolved,
+        created_at_unix_ms, updated_at_unix_ms
       ) VALUES (
         ${noteId},
         ${entities.get(mention.eid)?.id},
@@ -1876,6 +1901,8 @@ var init_model_store = __esm({
         ${mention.surface},
         ${mention.sourceStart},
         ${mention.sourceEnd},
+        ${mention.wordBoundarySuspect ? 1 : 0},
+        ${mention.resolved ? 1 : 0},
         ${now},
         ${now}
       )`);
@@ -1900,7 +1927,8 @@ var init_model_store = __esm({
               `WITH new_conflict(id) AS (SELECT last_insert_rowid())
           INSERT INTO note_mention_conflict_matches (
             conflict_id, resolved_entity_id, resolved_eid, text, surface_id,
-            surface, source_start, source_end, candidate_eids_json
+            surface, source_start, source_end, word_boundary_suspect,
+            candidate_eids_json
           ) ${conflict.matches.map((match, index) => {
                 const resolvedEntity = match.resolvedEid === void 0 ? void 0 : entities.get(match.resolvedEid);
                 const prefix = index === 0 ? "SELECT" : "UNION ALL SELECT";
@@ -1913,6 +1941,7 @@ var init_model_store = __esm({
                 ${sqlValue(match.surface)},
                 ${sqlValue(match.sourceStart)},
                 ${sqlValue(match.sourceEnd)},
+                ${sqlValue(match.wordBoundarySuspect ? 1 : 0)},
                 ${sqlValue(JSON.stringify(match.eids))}
                 FROM new_conflict`;
               }).join("\n")}`
@@ -1935,6 +1964,9 @@ var init_model_store = __esm({
           updated_at_unix_ms = ${now}
         WHERE id = ${noteId}`
         );
+      }
+      recomputeEntityRefCounts() {
+        runSqlite(this.databasePath, recomputeEntityRefCountsSql());
       }
     };
   }

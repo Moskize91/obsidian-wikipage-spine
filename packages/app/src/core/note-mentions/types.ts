@@ -54,6 +54,8 @@ export interface ResolvedMention {
   surface: string | undefined;
   sourceStart: number;
   sourceEnd: number;
+  wordBoundarySuspect: boolean;
+  resolved: boolean;
 }
 
 export interface MentionConflict {
@@ -74,5 +76,6 @@ export interface ConflictSurfaceMatch {
   sourceStart: number;
   sourceEnd: number;
   eids: string[];
+  wordBoundarySuspect: boolean;
   resolvedEid?: string;
 }

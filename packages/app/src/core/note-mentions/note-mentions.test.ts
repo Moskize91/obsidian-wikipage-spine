@@ -170,7 +170,7 @@ describe("note mentions", () => {
     expect(result.conflicts).toEqual([]);
   });
 
-  it("does not auto-resolve isolated single Han character matches", () => {
+  it("marks isolated single Han character matches as regular unresolved mentions", () => {
     const scanner = new FakeScanner([
       surfaceMatch({
         start: 0,
@@ -183,11 +183,18 @@ describe("note mentions", () => {
 
     const result = extractNoteMentions("定", scanner, entityLinkOptions);
 
-    expect(result.resolved).toEqual([]);
+    expect(result.resolved).toMatchObject([
+      {
+        text: "定",
+        eid: "Q2217023",
+        wordBoundarySuspect: false,
+        resolved: false,
+      },
+    ]);
     expect(result.conflicts).toEqual([]);
   });
 
-  it("does not auto-resolve Latin slices inside a larger word", () => {
+  it("marks Latin slices inside a larger word as word-boundary suspects", () => {
     const scanner = new FakeScanner([
       surfaceMatch({
         start: 13,
@@ -204,11 +211,18 @@ describe("note mentions", () => {
       entityLinkOptions,
     );
 
-    expect(result.resolved).toEqual([]);
+    expect(result.resolved).toMatchObject([
+      {
+        text: "Spa",
+        eid: "Q1341387",
+        wordBoundarySuspect: true,
+        resolved: false,
+      },
+    ]);
     expect(result.conflicts).toEqual([]);
   });
 
-  it("does not auto-resolve Han slices across word boundaries", () => {
+  it("marks Han slices across word boundaries as word-boundary suspects", () => {
     const scanner = new FakeScanner([
       surfaceMatch({
         start: 1,
@@ -221,7 +235,14 @@ describe("note mentions", () => {
 
     const result = extractNoteMentions("其中有一句", scanner, entityLinkOptions);
 
-    expect(result.resolved).toEqual([]);
+    expect(result.resolved).toMatchObject([
+      {
+        text: "中有",
+        eid: "Q256585",
+        wordBoundarySuspect: true,
+        resolved: false,
+      },
+    ]);
     expect(result.conflicts).toEqual([]);
   });
 
@@ -248,6 +269,8 @@ describe("note mentions", () => {
         text: "经院哲学",
         eid: "Q41679",
         surfaceId: 14,
+        wordBoundarySuspect: false,
+        resolved: false,
       },
     ]);
     expect(result.conflicts).toEqual([]);
@@ -275,8 +298,27 @@ describe("note mentions", () => {
     expect(result.conflicts[0]).toMatchObject({
       kind: "conflict",
       text: "苹果",
-      matches: [{ text: "苹果", eids: ["Q89", "Q312"] }],
+      matches: [
+        { text: "苹果", eids: ["Q89", "Q312"], wordBoundarySuspect: false },
+      ],
     });
+  });
+
+  it("filters word-boundary suspects out of unresolved conflicts", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 1,
+        end: 3,
+        surface: "中有",
+        surfaceId: 21,
+        qids: ["Q256585", "Q999"],
+      }),
+    ]);
+
+    const result = extractNoteMentions("其中有一句", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
   });
 
   it("clusters nested and overlapping surfaces into one conflict", () => {

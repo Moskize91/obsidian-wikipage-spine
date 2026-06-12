@@ -85,12 +85,18 @@ function renderReplacement(
 
 function selectLinkReplacements(mentions: NoteViewMentions): LinkReplacement[] {
   const replacements = [
-    ...mentions.resolved.map((mention) => ({
-      sourceStart: mention.sourceStart,
-      sourceEnd: mention.sourceEnd,
-      text: mention.text,
-      eid: mention.eid,
-    })),
+    ...mentions.resolved.flatMap((mention) =>
+      mention.wordBoundarySuspect && !mention.resolved
+        ? []
+        : [
+            {
+              sourceStart: mention.sourceStart,
+              sourceEnd: mention.sourceEnd,
+              text: mention.text,
+              eid: mention.eid,
+            },
+          ],
+    ),
     ...mentions.conflicts.flatMap((conflict) => conflictReplacements(conflict)),
   ];
 
