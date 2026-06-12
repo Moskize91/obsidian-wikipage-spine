@@ -36,6 +36,8 @@ describe("note view renderer", () => {
               surface: "北京大学",
               sourceStart: 0,
               sourceEnd: 4,
+              wordBoundarySuspect: false,
+              resolved: false,
             },
           ],
           conflicts: [],
@@ -61,6 +63,41 @@ describe("note view renderer", () => {
         renderOptions,
       ),
     ).toBe("[[wiki/北京大学|北京大学]]和北京大学");
+  });
+
+  it("keeps word-boundary suspect mentions unchanged until resolved", () => {
+    expect(
+      renderNoteView(
+        "Paul Vincent Spade",
+        {
+          resolved: [
+            {
+              ...resolvedMention(13, 16, "Spa", "Q3918"),
+              wordBoundarySuspect: true,
+            },
+          ],
+          conflicts: [],
+        },
+        renderOptions,
+      ),
+    ).toBe("Paul Vincent Spade");
+
+    expect(
+      renderNoteView(
+        "Paul Vincent Spade",
+        {
+          resolved: [
+            {
+              ...resolvedMention(13, 16, "Spa", "Q3918"),
+              wordBoundarySuspect: true,
+              resolved: true,
+            },
+          ],
+          conflicts: [],
+        },
+        renderOptions,
+      ),
+    ).toBe("Paul Vincent [[wiki/北京大学|Spa]]de");
   });
 
   it("resets repeated entity tracking after a thematic break", () => {
@@ -110,7 +147,7 @@ describe("note view renderer", () => {
     ).toBe("[[wiki/北京|北京]][[wiki/大学|大学]]");
   });
 
-  it("uses the longest non-overlapping unique match for unresolved conflicts", () => {
+  it("keeps unresolved conflicts unchanged in the view", () => {
     expect(
       renderNoteView(
         "北京大学",
@@ -135,7 +172,7 @@ describe("note view renderer", () => {
         },
         renderOptions,
       ),
-    ).toBe("[[wiki/北京大学|北京大学]]");
+    ).toBe("北京大学");
   });
 
   it("does not apply stale replacements inside protected table syntax", () => {
@@ -189,6 +226,8 @@ function resolvedMention(
     surface: text,
     sourceStart,
     sourceEnd,
+    wordBoundarySuspect: false,
+    resolved: false,
   };
 }
 
@@ -206,6 +245,7 @@ function conflictMatch(
     sourceStart,
     sourceEnd,
     eids,
+    wordBoundarySuspect: false,
   };
   return resolvedEid === undefined ? match : { ...match, resolvedEid };
 }

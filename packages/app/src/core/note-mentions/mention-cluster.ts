@@ -7,6 +7,15 @@ import type {
   TextSegment,
 } from "./types";
 
+interface WordSegment {
+  segment: string;
+  index: number;
+}
+
+interface WordSegmenter {
+  segment(text: string): Iterable<WordSegment>;
+}
+
 export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
   resolved: ResolvedMention[];
   conflicts: MentionConflict[];
@@ -25,6 +34,7 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
       if (eid === undefined) {
         continue;
       }
+      const resolvedEid = resolveExpandedEntityMatch(only);
       resolved.push({
         kind: "resolved",
         text: only.text,
@@ -33,14 +43,58 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
         surface: only.match.surface,
         sourceStart: only.sourceStart,
         sourceEnd: only.sourceEnd,
+        wordBoundarySuspect: isWordBoundarySuspect(only),
+        resolved: resolvedEid === eid,
       });
       continue;
     }
 
-    conflicts.push(createMentionConflict(cluster));
+    const conflict = createMentionConflict(cluster);
+    if (conflict !== undefined) {
+      conflicts.push(conflict);
+    }
   }
 
   return { resolved, conflicts };
+}
+
+function isWordBoundarySuspect(match: PositionedSurfaceMatch): boolean {
+  if (!needsSegmenterBoundaryCheck(match.text)) {
+    return false;
+  }
+
+  const boundaries = wordBoundaries(match.segment.text);
+  // 词边界只提供弱判定：子串切片非常可疑，但外部消歧可以显式覆盖这个判断。
+  return !boundaries.has(match.match.start) || !boundaries.has(match.match.end);
+}
+
+function needsSegmenterBoundaryCheck(text: string): boolean {
+  return /[\p{Script=Han}\p{Script=Latin}]/u.test(text);
+}
+
+const segmenter =
+  typeof (Intl as typeof Intl & { Segmenter?: unknown }).Segmenter ===
+  "function"
+    ? new (
+        Intl as typeof Intl & {
+          Segmenter: new (
+            locales: readonly string[],
+            options: { granularity: "word" },
+          ) => WordSegmenter;
+        }
+      ).Segmenter(["zh", "en"], { granularity: "word" })
+    : undefined;
+
+function wordBoundaries(text: string): Set<number> {
+  const boundaries = new Set([0, text.length]);
+  if (segmenter === undefined) {
+    return boundaries;
+  }
+  for (const segment of segmenter.segment(text)) {
+    boundaries.add(segment.index);
+    boundaries.add(segment.index + segment.segment.length);
+  }
+  return boundaries;
 }
 
 function clusterSurfaceMatches(
@@ -77,7 +131,9 @@ function clusterSurfaceMatches(
   return clusters;
 }
 
-function createMentionConflict(cluster: MatchCluster): MentionConflict {
+function createMentionConflict(
+  cluster: MatchCluster,
+): MentionConflict | undefined {
   const text = sliceSegmentChars(
     cluster.segment,
     cluster.segmentStart,
@@ -93,7 +149,8 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
     cluster.segmentEnd,
     "right",
   );
-  const matches = cluster.matches.map((match) => {
+  const matches = cluster.matches.flatMap((match) => {
+    const wordBoundarySuspect = isWordBoundarySuspect(match);
     const conflictMatch = {
       text: match.text,
       surfaceId: match.match.surfaceId,
@@ -101,12 +158,18 @@ function createMentionConflict(cluster: MatchCluster): MentionConflict {
       sourceStart: match.sourceStart,
       sourceEnd: match.sourceEnd,
       eids: match.match.qids,
+      wordBoundarySuspect,
     };
     const resolvedEid = resolveExpandedEntityMatch(match);
-    return resolvedEid === undefined
-      ? conflictMatch
-      : { ...conflictMatch, resolvedEid };
+    if (resolvedEid !== undefined) {
+      return [{ ...conflictMatch, resolvedEid }];
+    }
+    // 词边界判定是弱过滤：默认不让可疑切片参与冲突，但显式 resolved 可以覆盖。
+    return wordBoundarySuspect ? [] : [conflictMatch];
   });
+  if (matches.length === 0) {
+    return undefined;
+  }
   const hash = createConflictHash({
     text,
     leftContext,

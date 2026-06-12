@@ -75,6 +75,10 @@ export const MODEL_SCHEMA_SQL = [
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
+    resolved INTEGER NOT NULL DEFAULT 0
+      CHECK (resolved IN (0, 1)),
     created_at_unix_ms INTEGER NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
@@ -105,6 +109,8 @@ export const MODEL_SCHEMA_SQL = [
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
     candidate_eids_json TEXT NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
   )`,

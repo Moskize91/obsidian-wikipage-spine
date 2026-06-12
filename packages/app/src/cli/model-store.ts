@@ -181,7 +181,8 @@ export class ModelStore {
     for (const mention of mentions.resolved) {
       statements.push(sql`INSERT INTO note_mentions (
         note_id, entity_id, eid, text, surface_id, surface,
-        source_start, source_end, created_at_unix_ms, updated_at_unix_ms
+        source_start, source_end, word_boundary_suspect, resolved,
+        created_at_unix_ms, updated_at_unix_ms
       ) VALUES (
         ${noteId},
         ${entities.get(mention.eid)?.id},
@@ -191,6 +192,8 @@ export class ModelStore {
         ${mention.surface},
         ${mention.sourceStart},
         ${mention.sourceEnd},
+        ${mention.wordBoundarySuspect ? 1 : 0},
+        ${mention.resolved ? 1 : 0},
         ${now},
         ${now}
       )`);
@@ -217,7 +220,8 @@ export class ModelStore {
           `WITH new_conflict(id) AS (SELECT last_insert_rowid())
           INSERT INTO note_mention_conflict_matches (
             conflict_id, resolved_entity_id, resolved_eid, text, surface_id,
-            surface, source_start, source_end, candidate_eids_json
+            surface, source_start, source_end, word_boundary_suspect,
+            candidate_eids_json
           ) ${conflict.matches
             .map((match, index) => {
               const resolvedEntity =
@@ -234,6 +238,7 @@ export class ModelStore {
                 ${sqlValue(match.surface)},
                 ${sqlValue(match.sourceStart)},
                 ${sqlValue(match.sourceEnd)},
+                ${sqlValue(match.wordBoundarySuspect ? 1 : 0)},
                 ${sqlValue(JSON.stringify(match.eids))}
                 FROM new_conflict`;
             })
@@ -260,6 +265,10 @@ export class ModelStore {
         WHERE id = ${noteId}`,
     );
   }
+
+  recomputeEntityRefCounts(): void {
+    runSqlite(this.databasePath, recomputeEntityRefCountsSql());
+  }
 }
 
 export function entityViewPathForEid(entityDir: string, eid: string): string {
@@ -273,12 +282,14 @@ export function entityLinkTargetForEid(entityDir: string, eid: string): string {
 
 export function collectMentionEids(mentions: NoteViewMentions): string[] {
   return [
-    ...mentions.resolved.map((mention) => mention.eid),
+    ...mentions.resolved.flatMap((mention) =>
+      mention.wordBoundarySuspect && !mention.resolved ? [] : [mention.eid],
+    ),
     ...mentions.conflicts.flatMap((conflict) =>
       conflict.matches.flatMap((match) =>
         match.resolvedEid === undefined
-          ? match.eids
-          : [...match.eids, match.resolvedEid],
+          ? []
+          : [match.resolvedEid],
       ),
     ),
   ];
@@ -407,6 +418,7 @@ function recomputeEntityRefCountsSql(): string {
   return `UPDATE entities SET ref_count = (
     SELECT COUNT(*) FROM note_mentions
     WHERE note_mentions.eid = entities.eid
+      AND (note_mentions.word_boundary_suspect = 0 OR note_mentions.resolved = 1)
   ) + (
     SELECT COUNT(*) FROM note_mention_conflict_matches
     WHERE note_mention_conflict_matches.resolved_eid = entities.eid

@@ -2,7 +2,7 @@ import { existsSync, openSync, readFileSync, readSync, statSync, closeSync } fro
 import { join } from "node:path";
 import {
   shouldReportEntity,
-  type EntityPredicateFact,
+  type EntityColorValue,
 } from "./entity-policy";
 
 const ROOT_STATE_ID = 0;
@@ -27,9 +27,11 @@ export interface RuntimeManifest {
   state_output_record_bytes: number;
   qid_index_record_bytes?: number;
   surface_eid_index_record_bytes?: number;
-  eid_predicate_index_record_bytes?: number;
-  eid_predicate_value_record_bytes?: number;
-  eid_predicate_value_count?: number;
+  eid_color_index_record_bytes?: number;
+  eid_color_value_record_bytes?: number;
+  eid_color_value_count?: number;
+  entity_color_anchor_count?: number;
+  entity_color_max_distance?: number;
   states_len: number;
   surface_count: number;
   state_output_count: number;
@@ -44,8 +46,8 @@ export interface RuntimeManifest {
     surface_eid_values?: string;
     eid_qid_numbers?: string;
     eid_flags?: string;
-    eid_predicate_index?: string;
-    eid_predicate_values?: string;
+    eid_color_index?: string;
+    eid_color_values?: string;
   };
 }
 
@@ -85,8 +87,8 @@ export class SurfaceMatcher {
   private readonly surfaceEidValues?: U32Table;
   private readonly eidQidNumbers?: U32Table;
   private readonly eidFlags?: U32Table;
-  private readonly eidPredicateIndex?: RecordTable;
-  private readonly eidPredicateValues?: RecordTable;
+  private readonly eidColorIndex?: RecordTable;
+  private readonly eidColorValues?: RecordTable;
   private readonly entityPolicyEnabled: boolean;
   private readonly captureSurface: boolean;
   private readonly captureWindowUtf16: number;
@@ -107,7 +109,7 @@ export class SurfaceMatcher {
     this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
     this.entityPolicyEnabled =
       !(options.disableEntityPolicy ?? false) &&
-      hasEntityFactTables(this.manifest);
+      hasEntityColorTables(this.manifest);
 
     const blockBytes = options.blockBytes ?? 64 * 1024;
     this.charCodeMap = new U32Table(
@@ -144,21 +146,21 @@ export class SurfaceMatcher {
         options.qidCacheBlocks ?? 16,
         blockBytes,
       );
-      if (hasEntityFactTables(this.manifest)) {
+      if (hasEntityColorTables(this.manifest)) {
         this.eidFlags = new U32Table(
           join(rootDir, this.manifest.files.eid_flags),
           options.qidCacheBlocks ?? 16,
           blockBytes,
         );
-        this.eidPredicateIndex = new RecordTable(
-          join(rootDir, this.manifest.files.eid_predicate_index),
-          this.manifest.eid_predicate_index_record_bytes,
+        this.eidColorIndex = new RecordTable(
+          join(rootDir, this.manifest.files.eid_color_index),
+          this.manifest.eid_color_index_record_bytes,
           options.qidCacheBlocks ?? 16,
           blockBytes,
         );
-        this.eidPredicateValues = new RecordTable(
-          join(rootDir, this.manifest.files.eid_predicate_values),
-          this.manifest.eid_predicate_value_record_bytes,
+        this.eidColorValues = new RecordTable(
+          join(rootDir, this.manifest.files.eid_color_values),
+          this.manifest.eid_color_value_record_bytes,
           options.qidCacheBlocks ?? 16,
           blockBytes,
         );
@@ -240,8 +242,8 @@ export class SurfaceMatcher {
     this.surfaceEidValues?.close();
     this.eidQidNumbers?.close();
     this.eidFlags?.close();
-    this.eidPredicateIndex?.close();
-    this.eidPredicateValues?.close();
+    this.eidColorIndex?.close();
+    this.eidColorValues?.close();
   }
 
   private nextStateId(initialStateId: number, codePoint: number): number {
@@ -345,33 +347,31 @@ export class SurfaceMatcher {
   private shouldReportEid(eidId: number): boolean {
     if (
       this.eidFlags === undefined ||
-      this.eidPredicateIndex === undefined ||
-      this.eidPredicateValues === undefined
+      this.eidColorIndex === undefined ||
+      this.eidColorValues === undefined
     ) {
       return true;
     }
     return shouldReportEntity({
       flags: this.eidFlags.read(eidId),
-      predicates: this.readEidPredicates(eidId),
+      colors: this.readEidColorValues(eidId),
     });
   }
 
-  private *readEidPredicates(eidId: number): Generator<EntityPredicateFact> {
-    if (this.eidPredicateIndex === undefined || this.eidPredicateValues === undefined) {
+  private *readEidColorValues(eidId: number): Generator<EntityColorValue> {
+    if (this.eidColorIndex === undefined || this.eidColorValues === undefined) {
       return;
     }
-    const offset = this.eidPredicateIndex.byteOffset(eidId);
-    const predicateOffset = this.eidPredicateIndex.readU32At(offset);
-    const predicateLength = this.eidPredicateIndex.readU32At(offset + 4);
-    for (let index = 0; index < predicateLength; index += 1) {
-      const predicateRecordOffset = this.eidPredicateValues.byteOffset(
-        predicateOffset + index,
+    const offset = this.eidColorIndex.byteOffset(eidId);
+    const colorOffset = this.eidColorIndex.readU32At(offset);
+    const colorLength = this.eidColorIndex.readU32At(offset + 4);
+    for (let index = 0; index < colorLength; index += 1) {
+      const colorRecordOffset = this.eidColorValues.byteOffset(
+        colorOffset + index,
       );
       yield {
-        pid: this.eidPredicateValues.readU32At(predicateRecordOffset),
-        valueQidNumber: this.eidPredicateValues.readU32At(
-          predicateRecordOffset + 4,
-        ),
+        anchorId: this.eidColorValues.readU32At(colorRecordOffset),
+        distance: this.eidColorValues.readU32At(colorRecordOffset + 4),
       };
     }
   }
@@ -407,21 +407,21 @@ function hasLegacyQidTables(manifest: RuntimeManifest): manifest is RuntimeManif
   );
 }
 
-function hasEntityFactTables(manifest: RuntimeManifest): manifest is RuntimeManifest & {
-  eid_predicate_index_record_bytes: number;
-  eid_predicate_value_record_bytes: number;
+function hasEntityColorTables(manifest: RuntimeManifest): manifest is RuntimeManifest & {
+  eid_color_index_record_bytes: number;
+  eid_color_value_record_bytes: number;
   files: RuntimeManifest["files"] & {
     eid_flags: string;
-    eid_predicate_index: string;
-    eid_predicate_values: string;
+    eid_color_index: string;
+    eid_color_values: string;
   };
 } {
   return (
-    manifest.eid_predicate_index_record_bytes !== undefined &&
-    manifest.eid_predicate_value_record_bytes !== undefined &&
+    manifest.eid_color_index_record_bytes !== undefined &&
+    manifest.eid_color_value_record_bytes !== undefined &&
     manifest.files.eid_flags !== undefined &&
-    manifest.files.eid_predicate_index !== undefined &&
-    manifest.files.eid_predicate_values !== undefined
+    manifest.files.eid_color_index !== undefined &&
+    manifest.files.eid_color_values !== undefined
   );
 }
 
@@ -451,15 +451,15 @@ function validateManifest(manifest: RuntimeManifest): void {
         `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`,
       );
     }
-    if (hasEntityFactTables(manifest)) {
-      if (manifest.eid_predicate_index_record_bytes !== 8) {
+    if (hasEntityColorTables(manifest)) {
+      if (manifest.eid_color_index_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate index record size: ${manifest.eid_predicate_index_record_bytes}`,
+          `unsupported EID color index record size: ${manifest.eid_color_index_record_bytes}`,
         );
       }
-      if (manifest.eid_predicate_value_record_bytes !== 8) {
+      if (manifest.eid_color_value_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate value record size: ${manifest.eid_predicate_value_record_bytes}`,
+          `unsupported EID color value record size: ${manifest.eid_color_value_record_bytes}`,
         );
       }
     }

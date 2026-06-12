@@ -38,6 +38,10 @@ note view 修改检测分两级：
 
 同步结果只保存当前状态，不保存历史。自动拍板的 `ResolvedMention` 写入 `note_mentions`。需要消歧的 `MentionConflict` 写入 `note_mention_conflicts`，其内部的 `ConflictSurfaceMatch` 写入 `note_mention_conflict_matches`。
 
+surface match 会用 `Intl.Segmenter` 标记 `word_boundary_suspect`。这个字段是弱判定：如果 surface 像是更长词或人名内部的切片，默认不应成为实体引用；但外部消歧可以通过 `resolved` / `resolved_eid` 显式覆盖该判断。
+
+`note_mentions.resolved` 表示该 `ResolvedMention` 是由旧实体链接或外部决策强制确认。`word_boundary_suspect = 1` 且 `resolved = 0` 的 mention 只保存为观察结果，不计入 entity 引用计数，也不写回为内部链接。
+
 `note_mention_conflict_matches.resolved_eid` 表示该候选 surface match 在当前 conflict 方案中被选为哪个 EID。一个 conflict 可以有多个 match 带 `resolved_eid`，例如 `北京大学` 可以被解决为 `北京` 和 `大学` 两个引用。
 
 同一个 conflict 内所有已 resolved 的 match 不能重叠。SQLite schema 不表达这个约束；写入或继承 conflict resolution 的业务逻辑必须维护它。
@@ -48,7 +52,7 @@ note 数据库状态变化后，应触发数据库到 view 的 react 写回。�
 
 写回时，同一 section 内每个 EID 只渲染第一次内部链接，后续相同 EID 只输出纯文本。section 由正文中的 Markdown thematic break 分隔；文件开头 frontmatter 的 `---` 不作为 section 分隔。
 
-未解决的 `MentionConflict` 按最长且不重叠的唯一候选渲染。这个规则用于减少短词链接造成的视觉污染。
+未解决的 `MentionConflict` 不写回为内部链接。冲突解决是高成本动作，应由用户或 Agent 明确决策。
 
 ## Entity
 

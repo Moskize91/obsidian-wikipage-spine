@@ -642,12 +642,16 @@ function renderReplacement(replacement, seenEids, options) {
 }
 function selectLinkReplacements(mentions) {
   const replacements = [
-    ...mentions.resolved.map((mention) => ({
-      sourceStart: mention.sourceStart,
-      sourceEnd: mention.sourceEnd,
-      text: mention.text,
-      eid: mention.eid
-    })),
+    ...mentions.resolved.flatMap(
+      (mention) => mention.wordBoundarySuspect && !mention.resolved ? [] : [
+        {
+          sourceStart: mention.sourceStart,
+          sourceEnd: mention.sourceEnd,
+          text: mention.text,
+          eid: mention.eid
+        }
+      ]
+    ),
     ...mentions.conflicts.flatMap((conflict) => conflictReplacements(conflict))
   ];
   return selectNonOverlapping(replacements).sort(
@@ -666,23 +670,7 @@ function conflictReplacements(conflict) {
       (left, right) => left.sourceStart - right.sourceStart
     );
   }
-  const candidates = conflict.matches.flatMap((match) => {
-    const eid = match.eids.length === 1 ? match.eids[0] : void 0;
-    return eid === void 0 ? [] : [
-      {
-        sourceStart: match.sourceStart,
-        sourceEnd: match.sourceEnd,
-        text: match.text,
-        eid
-      }
-    ];
-  }).sort((left, right) => {
-    const lengthDelta = Array.from(right.text).length - Array.from(left.text).length;
-    return lengthDelta !== 0 ? lengthDelta : left.sourceStart - right.sourceStart;
-  });
-  return selectNonOverlapping(candidates).sort(
-    (left, right) => left.sourceStart - right.sourceStart
-  );
+  return [];
 }
 function selectNonOverlapping(replacements) {
   const selected = [];
@@ -860,6 +848,7 @@ function buildMentions(matches) {
       if (eid === void 0) {
         continue;
       }
+      const resolvedEid = resolveExpandedEntityMatch(only);
       resolved.push({
         kind: "resolved",
         text: only.text,
@@ -867,13 +856,39 @@ function buildMentions(matches) {
         surfaceId: only.match.surfaceId,
         surface: only.match.surface,
         sourceStart: only.sourceStart,
-        sourceEnd: only.sourceEnd
+        sourceEnd: only.sourceEnd,
+        wordBoundarySuspect: isWordBoundarySuspect(only),
+        resolved: resolvedEid === eid
       });
       continue;
     }
-    conflicts.push(createMentionConflict(cluster));
+    const conflict = createMentionConflict(cluster);
+    if (conflict !== void 0) {
+      conflicts.push(conflict);
+    }
   }
   return { resolved, conflicts };
+}
+function isWordBoundarySuspect(match) {
+  if (!needsSegmenterBoundaryCheck(match.text)) {
+    return false;
+  }
+  const boundaries = wordBoundaries(match.segment.text);
+  return !boundaries.has(match.match.start) || !boundaries.has(match.match.end);
+}
+function needsSegmenterBoundaryCheck(text) {
+  return /[\p{Script=Han}\p{Script=Latin}]/u.test(text);
+}
+function wordBoundaries(text) {
+  const boundaries = /* @__PURE__ */ new Set([0, text.length]);
+  if (segmenter === void 0) {
+    return boundaries;
+  }
+  for (const segment of segmenter.segment(text)) {
+    boundaries.add(segment.index);
+    boundaries.add(segment.index + segment.segment.length);
+  }
+  return boundaries;
 }
 function clusterSurfaceMatches(matches) {
   const clusters = [];
@@ -914,18 +929,26 @@ function createMentionConflict(cluster) {
     cluster.segmentEnd,
     "right"
   );
-  const matches = cluster.matches.map((match) => {
+  const matches = cluster.matches.flatMap((match) => {
+    const wordBoundarySuspect = isWordBoundarySuspect(match);
     const conflictMatch = {
       text: match.text,
       surfaceId: match.match.surfaceId,
       surface: match.match.surface,
       sourceStart: match.sourceStart,
       sourceEnd: match.sourceEnd,
-      eids: match.match.qids
+      eids: match.match.qids,
+      wordBoundarySuspect
     };
     const resolvedEid = resolveExpandedEntityMatch(match);
-    return resolvedEid === void 0 ? conflictMatch : { ...conflictMatch, resolvedEid };
+    if (resolvedEid !== void 0) {
+      return [{ ...conflictMatch, resolvedEid }];
+    }
+    return wordBoundarySuspect ? [] : [conflictMatch];
   });
+  if (matches.length === 0) {
+    return void 0;
+  }
   const hash = createConflictHash({
     text,
     leftContext,
@@ -963,10 +986,12 @@ function resolveExpandedEntityMatch(match) {
 function sliceSegmentChars(segment, start, end) {
   return segment.chars.slice(start, end).map((char) => char.char).join("");
 }
+var segmenter;
 var init_mention_cluster = __esm({
   "src/core/note-mentions/mention-cluster.ts"() {
     "use strict";
     init_conflict_hash();
+    segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(["zh", "en"], { granularity: "word" }) : void 0;
   }
 });
 
@@ -1000,51 +1025,112 @@ function shouldReportEntity(input) {
   if ((input.flags & ENTITY_FLAG_DISAMBIGUATION) !== 0) {
     return false;
   }
-  for (const predicate of input.predicates) {
-    if (POSITIVE_PREDICATES.has(predicate.pid)) {
-      return true;
+  let score = 0;
+  let hasScoredColor = false;
+  for (const color of input.colors) {
+    if (VETO_NEGATIVE_ANCHOR_IDS.has(color.anchorId) && color.distance <= VETO_NEGATIVE_MAX_DISTANCE) {
+      return false;
+    }
+    const value = colorScore(color);
+    if (value !== 0) {
+      hasScoredColor = true;
+      score += value;
     }
   }
-  return false;
+  return hasScoredColor && score > MIN_SURVIVAL_SCORE;
 }
-var ENTITY_FLAG_DISAMBIGUATION, POSITIVE_PREDICATES;
+function colorScore(color) {
+  const positiveWeight = POSITIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (positiveWeight !== void 0) {
+    return positiveWeight * distanceWeight(color.distance);
+  }
+  const negativeWeight = NEGATIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (negativeWeight !== void 0) {
+    return -negativeWeight * distanceWeight(color.distance);
+  }
+  return 0;
+}
+function distanceWeight(distance) {
+  if (distance === 0) {
+    return 1.5;
+  }
+  if (distance <= 1) {
+    return 1;
+  }
+  if (distance <= 2) {
+    return 0.7;
+  }
+  if (distance <= 4) {
+    return 0.35;
+  }
+  return 0.15;
+}
+var ENTITY_FLAG_DISAMBIGUATION, VETO_NEGATIVE_ANCHOR_IDS, VETO_NEGATIVE_MAX_DISTANCE, MIN_SURVIVAL_SCORE, POSITIVE_ANCHOR_WEIGHTS, NEGATIVE_ANCHOR_WEIGHTS;
 var init_entity_policy = __esm({
   "src/core/entity-policy.ts"() {
     "use strict";
     ENTITY_FLAG_DISAMBIGUATION = 1;
-    POSITIVE_PREDICATES = /* @__PURE__ */ new Set([
-      69,
-      // educated at
-      106,
-      // occupation
-      108,
-      // employer
-      112,
-      // founded by
-      178,
-      // developer
-      212,
-      // ISBN-13
-      356,
-      // DOI
-      496,
-      // ORCID iD
-      569,
-      // date of birth
-      570,
-      // date of death
-      571,
-      // inception
-      577,
-      // publication date
-      698,
-      // PubMed ID
-      800,
-      // notable work
-      932,
-      // PMCID
-      957
-      // ISBN-10
+    VETO_NEGATIVE_ANCHOR_IDS = /* @__PURE__ */ new Set([
+      15,
+      // Wikimedia disambiguation page
+      16,
+      // part of speech
+      17,
+      // grammeme
+      21
+      // punctuation mark
+    ]);
+    VETO_NEGATIVE_MAX_DISTANCE = 2;
+    MIN_SURVIVAL_SCORE = 0;
+    POSITIVE_ANCHOR_WEIGHTS = /* @__PURE__ */ new Map([
+      [0, 1],
+      // human
+      [1, 4],
+      // academic discipline
+      [2, 4],
+      // specialty
+      [3, 5],
+      // academic major
+      [4, 5],
+      // religious concept
+      [5, 6],
+      // philosophical concept
+      [6, 5],
+      // school of thought
+      [7, 1],
+      // term
+      [8, 3],
+      // technical term
+      [9, 6],
+      // religious text
+      [10, 2],
+      // publication
+      [11, 1],
+      // written work
+      [12, 4],
+      // literary work
+      [13, 2],
+      // organization
+      [14, 5]
+      // university
+    ]);
+    NEGATIVE_ANCHOR_WEIGHTS = /* @__PURE__ */ new Map([
+      [18, 4],
+      // linguistic unit
+      [19, 5],
+      // word
+      [20, 4],
+      // sign
+      [22, 3],
+      // type
+      [23, 3],
+      // class
+      [24, 3],
+      // type of work
+      [25, 3],
+      // type of event
+      [26, 3]
+      // type of process
     ]);
   }
 });
@@ -1056,8 +1142,8 @@ function hasEntityCandidateTables(manifest) {
 function hasLegacyQidTables(manifest) {
   return manifest.qid_index_record_bytes !== void 0 && manifest.files.qid_index !== void 0 && manifest.files.qid_values !== void 0;
 }
-function hasEntityFactTables(manifest) {
-  return manifest.eid_predicate_index_record_bytes !== void 0 && manifest.eid_predicate_value_record_bytes !== void 0 && manifest.files.eid_flags !== void 0 && manifest.files.eid_predicate_index !== void 0 && manifest.files.eid_predicate_values !== void 0;
+function hasEntityColorTables(manifest) {
+  return manifest.eid_color_index_record_bytes !== void 0 && manifest.eid_color_value_record_bytes !== void 0 && manifest.files.eid_flags !== void 0 && manifest.files.eid_color_index !== void 0 && manifest.files.eid_color_values !== void 0;
 }
 function readRuntimeManifest(rootDir) {
   return JSON.parse((0, import_node_fs2.readFileSync)((0, import_node_path2.join)(rootDir, "manifest.json"), "utf8"));
@@ -1084,15 +1170,15 @@ function validateManifest(manifest) {
         `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`
       );
     }
-    if (hasEntityFactTables(manifest)) {
-      if (manifest.eid_predicate_index_record_bytes !== 8) {
+    if (hasEntityColorTables(manifest)) {
+      if (manifest.eid_color_index_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate index record size: ${manifest.eid_predicate_index_record_bytes}`
+          `unsupported EID color index record size: ${manifest.eid_color_index_record_bytes}`
         );
       }
-      if (manifest.eid_predicate_value_record_bytes !== 8) {
+      if (manifest.eid_color_value_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate value record size: ${manifest.eid_predicate_value_record_bytes}`
+          `unsupported EID color value record size: ${manifest.eid_color_value_record_bytes}`
         );
       }
     }
@@ -1148,7 +1234,7 @@ var init_surface_matcher = __esm({
         validateManifest(this.manifest);
         this.captureSurface = options.captureSurface ?? true;
         this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
-        this.entityPolicyEnabled = !(options.disableEntityPolicy ?? false) && hasEntityFactTables(this.manifest);
+        this.entityPolicyEnabled = !(options.disableEntityPolicy ?? false) && hasEntityColorTables(this.manifest);
         const blockBytes = options.blockBytes ?? 64 * 1024;
         this.charCodeMap = new U32Table(
           (0, import_node_path2.join)(rootDir, this.manifest.files.char_code_map),
@@ -1184,21 +1270,21 @@ var init_surface_matcher = __esm({
             options.qidCacheBlocks ?? 16,
             blockBytes
           );
-          if (hasEntityFactTables(this.manifest)) {
+          if (hasEntityColorTables(this.manifest)) {
             this.eidFlags = new U32Table(
               (0, import_node_path2.join)(rootDir, this.manifest.files.eid_flags),
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
-            this.eidPredicateIndex = new RecordTable(
-              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_index),
-              this.manifest.eid_predicate_index_record_bytes,
+            this.eidColorIndex = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_color_index),
+              this.manifest.eid_color_index_record_bytes,
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
-            this.eidPredicateValues = new RecordTable(
-              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_values),
-              this.manifest.eid_predicate_value_record_bytes,
+            this.eidColorValues = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_color_values),
+              this.manifest.eid_color_value_record_bytes,
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
@@ -1271,8 +1357,8 @@ var init_surface_matcher = __esm({
         this.surfaceEidValues?.close();
         this.eidQidNumbers?.close();
         this.eidFlags?.close();
-        this.eidPredicateIndex?.close();
-        this.eidPredicateValues?.close();
+        this.eidColorIndex?.close();
+        this.eidColorValues?.close();
       }
       nextStateId(initialStateId, codePoint) {
         const mappedCode = this.readMappedCode(codePoint);
@@ -1360,30 +1446,28 @@ var init_surface_matcher = __esm({
         return qids;
       }
       shouldReportEid(eidId) {
-        if (this.eidFlags === void 0 || this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+        if (this.eidFlags === void 0 || this.eidColorIndex === void 0 || this.eidColorValues === void 0) {
           return true;
         }
         return shouldReportEntity({
           flags: this.eidFlags.read(eidId),
-          predicates: this.readEidPredicates(eidId)
+          colors: this.readEidColorValues(eidId)
         });
       }
-      *readEidPredicates(eidId) {
-        if (this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+      *readEidColorValues(eidId) {
+        if (this.eidColorIndex === void 0 || this.eidColorValues === void 0) {
           return;
         }
-        const offset = this.eidPredicateIndex.byteOffset(eidId);
-        const predicateOffset = this.eidPredicateIndex.readU32At(offset);
-        const predicateLength = this.eidPredicateIndex.readU32At(offset + 4);
-        for (let index = 0; index < predicateLength; index += 1) {
-          const predicateRecordOffset = this.eidPredicateValues.byteOffset(
-            predicateOffset + index
+        const offset = this.eidColorIndex.byteOffset(eidId);
+        const colorOffset = this.eidColorIndex.readU32At(offset);
+        const colorLength = this.eidColorIndex.readU32At(offset + 4);
+        for (let index = 0; index < colorLength; index += 1) {
+          const colorRecordOffset = this.eidColorValues.byteOffset(
+            colorOffset + index
           );
           yield {
-            pid: this.eidPredicateValues.readU32At(predicateRecordOffset),
-            valueQidNumber: this.eidPredicateValues.readU32At(
-              predicateRecordOffset + 4
-            )
+            anchorId: this.eidColorValues.readU32At(colorRecordOffset),
+            distance: this.eidColorValues.readU32At(colorRecordOffset + 4)
           };
         }
       }
@@ -1546,6 +1630,10 @@ var init_schema = __esm({
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
+    resolved INTEGER NOT NULL DEFAULT 0
+      CHECK (resolved IN (0, 1)),
     created_at_unix_ms INTEGER NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
@@ -1576,6 +1664,8 @@ var init_schema = __esm({
     surface TEXT,
     source_start INTEGER NOT NULL,
     source_end INTEGER NOT NULL,
+    word_boundary_suspect INTEGER NOT NULL DEFAULT 0
+      CHECK (word_boundary_suspect IN (0, 1)),
     candidate_eids_json TEXT NOT NULL,
     CHECK (source_start >= 0 AND source_end > source_start)
   )`,
@@ -1611,10 +1701,12 @@ function entityLinkTargetForEid(entityDir, eid) {
 }
 function collectMentionEids(mentions) {
   return [
-    ...mentions.resolved.map((mention) => mention.eid),
+    ...mentions.resolved.flatMap(
+      (mention) => mention.wordBoundarySuspect && !mention.resolved ? [] : [mention.eid]
+    ),
     ...mentions.conflicts.flatMap(
       (conflict) => conflict.matches.flatMap(
-        (match) => match.resolvedEid === void 0 ? match.eids : [...match.eids, match.resolvedEid]
+        (match) => match.resolvedEid === void 0 ? [] : [match.resolvedEid]
       )
     )
   ];
@@ -1718,6 +1810,7 @@ function recomputeEntityRefCountsSql() {
   return `UPDATE entities SET ref_count = (
     SELECT COUNT(*) FROM note_mentions
     WHERE note_mentions.eid = entities.eid
+      AND (note_mentions.word_boundary_suspect = 0 OR note_mentions.resolved = 1)
   ) + (
     SELECT COUNT(*) FROM note_mention_conflict_matches
     WHERE note_mention_conflict_matches.resolved_eid = entities.eid
@@ -1858,7 +1951,8 @@ var init_model_store = __esm({
         for (const mention of mentions.resolved) {
           statements.push(sql`INSERT INTO note_mentions (
         note_id, entity_id, eid, text, surface_id, surface,
-        source_start, source_end, created_at_unix_ms, updated_at_unix_ms
+        source_start, source_end, word_boundary_suspect, resolved,
+        created_at_unix_ms, updated_at_unix_ms
       ) VALUES (
         ${noteId},
         ${entities.get(mention.eid)?.id},
@@ -1868,6 +1962,8 @@ var init_model_store = __esm({
         ${mention.surface},
         ${mention.sourceStart},
         ${mention.sourceEnd},
+        ${mention.wordBoundarySuspect ? 1 : 0},
+        ${mention.resolved ? 1 : 0},
         ${now},
         ${now}
       )`);
@@ -1892,7 +1988,8 @@ var init_model_store = __esm({
               `WITH new_conflict(id) AS (SELECT last_insert_rowid())
           INSERT INTO note_mention_conflict_matches (
             conflict_id, resolved_entity_id, resolved_eid, text, surface_id,
-            surface, source_start, source_end, candidate_eids_json
+            surface, source_start, source_end, word_boundary_suspect,
+            candidate_eids_json
           ) ${conflict.matches.map((match, index) => {
                 const resolvedEntity = match.resolvedEid === void 0 ? void 0 : entities.get(match.resolvedEid);
                 const prefix = index === 0 ? "SELECT" : "UNION ALL SELECT";
@@ -1905,6 +2002,7 @@ var init_model_store = __esm({
                 ${sqlValue(match.surface)},
                 ${sqlValue(match.sourceStart)},
                 ${sqlValue(match.sourceEnd)},
+                ${sqlValue(match.wordBoundarySuspect ? 1 : 0)},
                 ${sqlValue(JSON.stringify(match.eids))}
                 FROM new_conflict`;
               }).join("\n")}`
@@ -1927,6 +2025,9 @@ var init_model_store = __esm({
           updated_at_unix_ms = ${now}
         WHERE id = ${noteId}`
         );
+      }
+      recomputeEntityRefCounts() {
+        runSqlite(this.databasePath, recomputeEntityRefCountsSql());
       }
     };
   }
