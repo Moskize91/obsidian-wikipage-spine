@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{copy, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_USER_AGENT: &str =
     "obsidian-wikipage-spine-dataset-builder/0.1 (+https://github.com/moskize91/obsidian-wikipage-spine)";
@@ -128,6 +128,7 @@ struct ProcessArgs {
     wikis: Vec<String>,
     date: String,
     limit: Option<usize>,
+    progress_every: usize,
 }
 
 impl Default for ProcessArgs {
@@ -138,6 +139,7 @@ impl Default for ProcessArgs {
             wikis: vec!["zhwiki".to_string(), "enwiki".to_string()],
             date: "latest".to_string(),
             limit: None,
+            progress_every: 100_000,
         }
     }
 }
@@ -433,6 +435,15 @@ fn parse_process_args(raw_args: Vec<String>) -> Result<ProcessArgs> {
                     CliError(format!("--limit must be a positive integer: {err}"))
                 })?);
             }
+            "--progress-every" => {
+                index += 1;
+                let value = require_value(&raw_args, index, "--progress-every")?;
+                args.progress_every = value.parse::<usize>().map_err(|err| {
+                    CliError(format!(
+                        "--progress-every must be a positive integer: {err}"
+                    ))
+                })?;
+            }
             "-h" | "--help" => {
                 print_process_help();
                 std::process::exit(0);
@@ -444,6 +455,9 @@ fn parse_process_args(raw_args: Vec<String>) -> Result<ProcessArgs> {
 
     if args.wikis.is_empty() {
         return Err(CliError("at least one wiki must be selected".to_string()).into());
+    }
+    if args.progress_every == 0 {
+        return Err(CliError("--progress-every must be greater than zero".to_string()).into());
     }
     validate_date(&args.date)?;
 
@@ -651,8 +665,13 @@ fn preprocess(args: ProcessArgs) -> Result<()> {
         "processing Wikidata entity type edges for {} surface QIDs",
         surface_qid_numbers.len()
     );
-    let entity_type_edges =
-        read_wikidata_entity_type_edges(&args.dumps, &args.date, &surface_qid_numbers, args.limit)?;
+    let entity_type_edges = read_wikidata_entity_type_edges(
+        &args.dumps,
+        &args.date,
+        &surface_qid_numbers,
+        args.limit,
+        args.progress_every,
+    )?;
 
     write_surface_sources_tsv(&out_dir.join("surface_sources.tsv"), &all_surfaces)?;
     write_surface_qid_lists_tsv(&out_dir.join("surface_qids.tsv"), &surface_qids)?;
@@ -1786,6 +1805,7 @@ fn read_wikidata_entity_type_edges(
     date: &str,
     qids: &HashSet<u32>,
     limit: Option<usize>,
+    progress_every: usize,
 ) -> Result<HashMap<u32, EntityTypeEdges>> {
     let mut edges = qids
         .iter()
@@ -1801,7 +1821,14 @@ fn read_wikidata_entity_type_edges(
         .into());
     }
 
+    eprintln!("scanning Wikidata entities dump {}", path.display());
+    let started = Instant::now();
     let mut handled = 0usize;
+    let mut candidate_hits = 0usize;
+    let mut retained = 0usize;
+    let mut retained_with_type_targets = 0usize;
+    let mut retained_type_target_count = 0usize;
+    let mut retained_disambiguations = 0usize;
     let reader = open_wikidata_entities_reader(&path)?;
     for line in reader.lines() {
         let line = line?;
@@ -1818,16 +1845,64 @@ fn read_wikidata_entity_type_edges(
             continue;
         };
         let entity_edges = extract_entity_type_edges(&entity);
-        if qids.contains(&qid) || entity_edges.flags != 0 || !entity_edges.type_targets.is_empty() {
+        let is_candidate = qids.contains(&qid);
+        if is_candidate {
+            candidate_hits += 1;
+        }
+        if is_candidate || entity_edges.flags != 0 || !entity_edges.type_targets.is_empty() {
+            retained += 1;
+            if !entity_edges.type_targets.is_empty() {
+                retained_with_type_targets += 1;
+                retained_type_target_count += entity_edges.type_targets.len();
+            }
+            if entity_edges.flags != 0 {
+                retained_disambiguations += 1;
+            }
             edges.insert(qid, entity_edges);
         }
         handled += 1;
+        if handled % progress_every == 0 {
+            let elapsed = started.elapsed().as_secs_f64();
+            let entities_per_second = if elapsed > 0.0 {
+                handled as f64 / elapsed
+            } else {
+                0.0
+            };
+            eprintln!(
+                "wikidata_entities scanned={} candidate_hits={} retained={} retained_with_type_targets={} retained_type_targets={} retained_disambiguations={} elapsed_s={:.1} entities_per_s={:.1}",
+                handled,
+                candidate_hits,
+                retained,
+                retained_with_type_targets,
+                retained_type_target_count,
+                retained_disambiguations,
+                elapsed,
+                entities_per_second
+            );
+        }
         if let Some(limit) = limit {
             if handled >= limit {
                 break;
             }
         }
     }
+    let elapsed = started.elapsed().as_secs_f64();
+    let entities_per_second = if elapsed > 0.0 {
+        handled as f64 / elapsed
+    } else {
+        0.0
+    };
+    eprintln!(
+        "wikidata_entities done scanned={} candidate_hits={} retained={} retained_with_type_targets={} retained_type_targets={} retained_disambiguations={} elapsed_s={:.1} entities_per_s={:.1}",
+        handled,
+        candidate_hits,
+        retained,
+        retained_with_type_targets,
+        retained_type_target_count,
+        retained_disambiguations,
+        elapsed,
+        entities_per_second
+    );
     Ok(edges)
 }
 
@@ -2476,6 +2551,7 @@ fn print_process_help() {
     println!("  --wikis <csv>                Wiki DB names (default: zhwiki,enwiki)");
     println!("  --date <latest|YYYYMMDD>     Dump date (default: latest)");
     println!("  --limit <n>                  Debug limit for parsed INSERT tuples per table");
+    println!("  --progress-every <n>         Print Wikidata progress every n entities");
 }
 
 fn print_compile_help() {

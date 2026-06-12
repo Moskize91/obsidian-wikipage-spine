@@ -18,9 +18,27 @@ describe("entity policy", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        colors: [{ anchorId: 1, distance: 2 }],
+        colors: [{ anchorId: 6, distance: 1 }],
       }),
     ).toBe(true);
+  });
+
+  it("does not auto-report entities that only hit broad religious-concept anchors", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [{ anchorId: 4, distance: 1 }],
+      }),
+    ).toBe(false);
+  });
+
+  it("does not report entities that only hit broad positive anchors", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [{ anchorId: 1, distance: 2 }],
+      }),
+    ).toBe(false);
   });
 
   it("does not report anchor entities themselves", () => {
@@ -37,7 +55,7 @@ describe("entity policy", () => {
       shouldReportEntity({
         flags: 0,
         colors: [
-          { anchorId: 1, distance: 2 },
+          { anchorId: 6, distance: 1 },
           { anchorId: 18, distance: 1 },
         ],
       }),
@@ -49,7 +67,7 @@ describe("entity policy", () => {
       shouldReportEntity({
         flags: 0,
         colors: [
-          { anchorId: 1, distance: 2 },
+          { anchorId: 6, distance: 1 },
           { anchorId: 18, distance: 5 },
         ],
       }),

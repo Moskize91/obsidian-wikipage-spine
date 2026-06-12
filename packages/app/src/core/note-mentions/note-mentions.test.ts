@@ -170,6 +170,89 @@ describe("note mentions", () => {
     expect(result.conflicts).toEqual([]);
   });
 
+  it("does not auto-resolve isolated single Han character matches", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 0,
+        end: 1,
+        surface: "定",
+        surfaceId: 11,
+        qids: ["Q2217023"],
+      }),
+    ]);
+
+    const result = extractNoteMentions("定", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("does not auto-resolve Latin slices inside a larger word", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 13,
+        end: 16,
+        surface: "Spa",
+        surfaceId: 12,
+        qids: ["Q1341387"],
+      }),
+    ]);
+
+    const result = extractNoteMentions(
+      "Paul Vincent Spade",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("does not auto-resolve Han slices across word boundaries", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 1,
+        end: 3,
+        surface: "中有",
+        surfaceId: 13,
+        qids: ["Q256585"],
+      }),
+    ]);
+
+    const result = extractNoteMentions("其中有一句", scanner, entityLinkOptions);
+
+    expect(result.resolved).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it("keeps auto-resolving multi-word technical phrases when edges align", () => {
+    const scanner = new FakeScanner([
+      surfaceMatch({
+        start: 6,
+        end: 10,
+        surface: "经院哲学",
+        surfaceId: 14,
+        qids: ["Q41679"],
+      }),
+    ]);
+
+    const result = extractNoteMentions(
+      "中世纪神学与经院哲学常常被描述",
+      scanner,
+      entityLinkOptions,
+    );
+
+    expect(result.resolved).toMatchObject([
+      {
+        kind: "resolved",
+        text: "经院哲学",
+        eid: "Q41679",
+        surfaceId: 14,
+      },
+    ]);
+    expect(result.conflicts).toEqual([]);
+  });
+
   it("creates conflicts for a single ambiguous surface", () => {
     const scanner = new FakeScanner([
       surfaceMatch({

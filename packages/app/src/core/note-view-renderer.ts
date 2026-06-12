@@ -114,32 +114,8 @@ function conflictReplacements(conflict: MentionConflict): LinkReplacement[] {
     );
   }
 
-  const candidates = conflict.matches
-    .flatMap((match) => {
-      const eid = match.eids.length === 1 ? match.eids[0] : undefined;
-      return eid === undefined
-        ? []
-        : [
-            {
-              sourceStart: match.sourceStart,
-              sourceEnd: match.sourceEnd,
-              text: match.text,
-              eid,
-            },
-          ];
-    })
-    .sort((left, right) => {
-      const lengthDelta =
-        Array.from(right.text).length - Array.from(left.text).length;
-      return lengthDelta !== 0
-        ? lengthDelta
-        : left.sourceStart - right.sourceStart;
-    });
-
-  // 未消歧时优先长词，避免把自然语言里的长实体拆成多个视觉噪声更高的短链接。
-  return selectNonOverlapping(candidates).sort(
-    (left, right) => left.sourceStart - right.sourceStart,
-  );
+  // 冲突解决是高成本动作，未解决前只入库等待用户或 Agent 决策，不能把猜测写回 view。
+  return [];
 }
 
 function selectNonOverlapping(

@@ -277,8 +277,8 @@ export function collectMentionEids(mentions: NoteViewMentions): string[] {
     ...mentions.conflicts.flatMap((conflict) =>
       conflict.matches.flatMap((match) =>
         match.resolvedEid === undefined
-          ? match.eids
-          : [...match.eids, match.resolvedEid],
+          ? []
+          : [match.resolvedEid],
       ),
     ),
   ];

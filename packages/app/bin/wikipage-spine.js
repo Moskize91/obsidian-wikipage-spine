@@ -666,23 +666,7 @@ function conflictReplacements(conflict) {
       (left, right) => left.sourceStart - right.sourceStart
     );
   }
-  const candidates = conflict.matches.flatMap((match) => {
-    const eid = match.eids.length === 1 ? match.eids[0] : void 0;
-    return eid === void 0 ? [] : [
-      {
-        sourceStart: match.sourceStart,
-        sourceEnd: match.sourceEnd,
-        text: match.text,
-        eid
-      }
-    ];
-  }).sort((left, right) => {
-    const lengthDelta = Array.from(right.text).length - Array.from(left.text).length;
-    return lengthDelta !== 0 ? lengthDelta : left.sourceStart - right.sourceStart;
-  });
-  return selectNonOverlapping(candidates).sort(
-    (left, right) => left.sourceStart - right.sourceStart
-  );
+  return [];
 }
 function selectNonOverlapping(replacements) {
   const selected = [];
@@ -857,7 +841,7 @@ function buildMentions(matches) {
     if (cluster.matches.length === 1 && cluster.matches[0]?.match.qids.length === 1) {
       const only = cluster.matches[0];
       const eid = only.match.qids[0];
-      if (eid === void 0) {
+      if (eid === void 0 || isSingleCjkCharacter(only.text) || isInsideSegmenterWord(only)) {
         continue;
       }
       resolved.push({
@@ -874,6 +858,30 @@ function buildMentions(matches) {
     conflicts.push(createMentionConflict(cluster));
   }
   return { resolved, conflicts };
+}
+function isSingleCjkCharacter(text) {
+  return Array.from(text).length === 1 && new RegExp("\\p{Script=Han}", "u").test(text);
+}
+function isInsideSegmenterWord(match) {
+  if (!needsSegmenterBoundaryCheck(match.text)) {
+    return false;
+  }
+  const boundaries = wordBoundaries(match.segment.text);
+  return !boundaries.has(match.match.start) || !boundaries.has(match.match.end);
+}
+function needsSegmenterBoundaryCheck(text) {
+  return /[\p{Script=Han}\p{Script=Latin}]/u.test(text);
+}
+function wordBoundaries(text) {
+  const boundaries = /* @__PURE__ */ new Set([0, text.length]);
+  if (segmenter === void 0) {
+    return boundaries;
+  }
+  for (const segment of segmenter.segment(text)) {
+    boundaries.add(segment.index);
+    boundaries.add(segment.index + segment.segment.length);
+  }
+  return boundaries;
 }
 function clusterSurfaceMatches(matches) {
   const clusters = [];
@@ -963,10 +971,12 @@ function resolveExpandedEntityMatch(match) {
 function sliceSegmentChars(segment, start, end) {
   return segment.chars.slice(start, end).map((char) => char.char).join("");
 }
+var segmenter;
 var init_mention_cluster = __esm({
   "src/core/note-mentions/mention-cluster.ts"() {
     "use strict";
     init_conflict_hash();
+    segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(["zh", "en"], { granularity: "word" }) : void 0;
   }
 });
 
@@ -1000,52 +1010,52 @@ function shouldReportEntity(input) {
   if ((input.flags & ENTITY_FLAG_DISAMBIGUATION) !== 0) {
     return false;
   }
-  for (const predicate of input.predicates) {
-    if (POSITIVE_PREDICATES.has(predicate.pid)) {
-      return true;
+  let hasPositive = false;
+  for (const color of input.colors) {
+    if (NEGATIVE_ANCHOR_IDS.has(color.anchorId) && color.distance <= MAX_NEGATIVE_DISTANCE) {
+      return false;
+    }
+    const maxPositiveDistance = POSITIVE_ANCHOR_MAX_DISTANCE.get(
+      color.anchorId
+    );
+    if (maxPositiveDistance !== void 0 && color.distance > 0 && color.distance <= maxPositiveDistance) {
+      hasPositive = true;
     }
   }
-  return false;
+  return hasPositive;
 }
-var ENTITY_FLAG_DISAMBIGUATION, POSITIVE_PREDICATES;
+var ENTITY_FLAG_DISAMBIGUATION, POSITIVE_ANCHOR_MAX_DISTANCE, NEGATIVE_ANCHOR_IDS, MAX_NEGATIVE_DISTANCE;
 var init_entity_policy = __esm({
   "src/core/entity-policy.ts"() {
     "use strict";
     ENTITY_FLAG_DISAMBIGUATION = 1;
-    POSITIVE_PREDICATES = /* @__PURE__ */ new Set([
-      69,
-      // educated at
-      106,
-      // occupation
-      108,
-      // employer
-      112,
-      // founded by
-      178,
-      // developer
-      212,
-      // ISBN-13
-      356,
-      // DOI
-      496,
-      // ORCID iD
-      569,
-      // date of birth
-      570,
-      // date of death
-      571,
-      // inception
-      577,
-      // publication date
-      698,
-      // PubMed ID
-      800,
-      // notable work
-      932,
-      // PMCID
-      957
-      // ISBN-10
+    POSITIVE_ANCHOR_MAX_DISTANCE = /* @__PURE__ */ new Map([
+      [6, 2],
+      // school of thought
+      [8, 1],
+      // technical term
+      [9, 1],
+      // religious text
+      [12, 1],
+      // literary work
+      [14, 1]
+      // university
     ]);
+    NEGATIVE_ANCHOR_IDS = /* @__PURE__ */ new Set([
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ]);
+    MAX_NEGATIVE_DISTANCE = 2;
   }
 });
 
@@ -1056,8 +1066,8 @@ function hasEntityCandidateTables(manifest) {
 function hasLegacyQidTables(manifest) {
   return manifest.qid_index_record_bytes !== void 0 && manifest.files.qid_index !== void 0 && manifest.files.qid_values !== void 0;
 }
-function hasEntityFactTables(manifest) {
-  return manifest.eid_predicate_index_record_bytes !== void 0 && manifest.eid_predicate_value_record_bytes !== void 0 && manifest.files.eid_flags !== void 0 && manifest.files.eid_predicate_index !== void 0 && manifest.files.eid_predicate_values !== void 0;
+function hasEntityColorTables(manifest) {
+  return manifest.eid_color_index_record_bytes !== void 0 && manifest.eid_color_value_record_bytes !== void 0 && manifest.files.eid_flags !== void 0 && manifest.files.eid_color_index !== void 0 && manifest.files.eid_color_values !== void 0;
 }
 function readRuntimeManifest(rootDir) {
   return JSON.parse((0, import_node_fs2.readFileSync)((0, import_node_path2.join)(rootDir, "manifest.json"), "utf8"));
@@ -1084,15 +1094,15 @@ function validateManifest(manifest) {
         `unsupported surface EID index record size: ${manifest.surface_eid_index_record_bytes}`
       );
     }
-    if (hasEntityFactTables(manifest)) {
-      if (manifest.eid_predicate_index_record_bytes !== 8) {
+    if (hasEntityColorTables(manifest)) {
+      if (manifest.eid_color_index_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate index record size: ${manifest.eid_predicate_index_record_bytes}`
+          `unsupported EID color index record size: ${manifest.eid_color_index_record_bytes}`
         );
       }
-      if (manifest.eid_predicate_value_record_bytes !== 8) {
+      if (manifest.eid_color_value_record_bytes !== 8) {
         throw new Error(
-          `unsupported EID predicate value record size: ${manifest.eid_predicate_value_record_bytes}`
+          `unsupported EID color value record size: ${manifest.eid_color_value_record_bytes}`
         );
       }
     }
@@ -1148,7 +1158,7 @@ var init_surface_matcher = __esm({
         validateManifest(this.manifest);
         this.captureSurface = options.captureSurface ?? true;
         this.captureWindowUtf16 = options.captureWindowUtf16 ?? 4096;
-        this.entityPolicyEnabled = !(options.disableEntityPolicy ?? false) && hasEntityFactTables(this.manifest);
+        this.entityPolicyEnabled = !(options.disableEntityPolicy ?? false) && hasEntityColorTables(this.manifest);
         const blockBytes = options.blockBytes ?? 64 * 1024;
         this.charCodeMap = new U32Table(
           (0, import_node_path2.join)(rootDir, this.manifest.files.char_code_map),
@@ -1184,21 +1194,21 @@ var init_surface_matcher = __esm({
             options.qidCacheBlocks ?? 16,
             blockBytes
           );
-          if (hasEntityFactTables(this.manifest)) {
+          if (hasEntityColorTables(this.manifest)) {
             this.eidFlags = new U32Table(
               (0, import_node_path2.join)(rootDir, this.manifest.files.eid_flags),
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
-            this.eidPredicateIndex = new RecordTable(
-              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_index),
-              this.manifest.eid_predicate_index_record_bytes,
+            this.eidColorIndex = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_color_index),
+              this.manifest.eid_color_index_record_bytes,
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
-            this.eidPredicateValues = new RecordTable(
-              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_predicate_values),
-              this.manifest.eid_predicate_value_record_bytes,
+            this.eidColorValues = new RecordTable(
+              (0, import_node_path2.join)(rootDir, this.manifest.files.eid_color_values),
+              this.manifest.eid_color_value_record_bytes,
               options.qidCacheBlocks ?? 16,
               blockBytes
             );
@@ -1271,8 +1281,8 @@ var init_surface_matcher = __esm({
         this.surfaceEidValues?.close();
         this.eidQidNumbers?.close();
         this.eidFlags?.close();
-        this.eidPredicateIndex?.close();
-        this.eidPredicateValues?.close();
+        this.eidColorIndex?.close();
+        this.eidColorValues?.close();
       }
       nextStateId(initialStateId, codePoint) {
         const mappedCode = this.readMappedCode(codePoint);
@@ -1360,30 +1370,28 @@ var init_surface_matcher = __esm({
         return qids;
       }
       shouldReportEid(eidId) {
-        if (this.eidFlags === void 0 || this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+        if (this.eidFlags === void 0 || this.eidColorIndex === void 0 || this.eidColorValues === void 0) {
           return true;
         }
         return shouldReportEntity({
           flags: this.eidFlags.read(eidId),
-          predicates: this.readEidPredicates(eidId)
+          colors: this.readEidColorValues(eidId)
         });
       }
-      *readEidPredicates(eidId) {
-        if (this.eidPredicateIndex === void 0 || this.eidPredicateValues === void 0) {
+      *readEidColorValues(eidId) {
+        if (this.eidColorIndex === void 0 || this.eidColorValues === void 0) {
           return;
         }
-        const offset = this.eidPredicateIndex.byteOffset(eidId);
-        const predicateOffset = this.eidPredicateIndex.readU32At(offset);
-        const predicateLength = this.eidPredicateIndex.readU32At(offset + 4);
-        for (let index = 0; index < predicateLength; index += 1) {
-          const predicateRecordOffset = this.eidPredicateValues.byteOffset(
-            predicateOffset + index
+        const offset = this.eidColorIndex.byteOffset(eidId);
+        const colorOffset = this.eidColorIndex.readU32At(offset);
+        const colorLength = this.eidColorIndex.readU32At(offset + 4);
+        for (let index = 0; index < colorLength; index += 1) {
+          const colorRecordOffset = this.eidColorValues.byteOffset(
+            colorOffset + index
           );
           yield {
-            pid: this.eidPredicateValues.readU32At(predicateRecordOffset),
-            valueQidNumber: this.eidPredicateValues.readU32At(
-              predicateRecordOffset + 4
-            )
+            anchorId: this.eidColorValues.readU32At(colorRecordOffset),
+            distance: this.eidColorValues.readU32At(colorRecordOffset + 4)
           };
         }
       }
@@ -1614,7 +1622,7 @@ function collectMentionEids(mentions) {
     ...mentions.resolved.map((mention) => mention.eid),
     ...mentions.conflicts.flatMap(
       (conflict) => conflict.matches.flatMap(
-        (match) => match.resolvedEid === void 0 ? match.eids : [...match.eids, match.resolvedEid]
+        (match) => match.resolvedEid === void 0 ? [] : [match.resolvedEid]
       )
     )
   ];

@@ -7,6 +7,15 @@ import type {
   TextSegment,
 } from "./types";
 
+interface WordSegment {
+  segment: string;
+  index: number;
+}
+
+interface WordSegmenter {
+  segment(text: string): Iterable<WordSegment>;
+}
+
 export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
   resolved: ResolvedMention[];
   conflicts: MentionConflict[];
@@ -22,7 +31,11 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
     ) {
       const only = cluster.matches[0];
       const eid = only.match.qids[0];
-      if (eid === undefined) {
+      if (
+        eid === undefined ||
+        isSingleCjkCharacter(only.text) ||
+        isInsideSegmenterWord(only)
+      ) {
         continue;
       }
       resolved.push({
@@ -41,6 +54,50 @@ export function buildMentions(matches: readonly PositionedSurfaceMatch[]): {
   }
 
   return { resolved, conflicts };
+}
+
+function isSingleCjkCharacter(text: string): boolean {
+  return Array.from(text).length === 1 && /\p{Script=Han}/u.test(text);
+}
+
+function isInsideSegmenterWord(match: PositionedSurfaceMatch): boolean {
+  if (!needsSegmenterBoundaryCheck(match.text)) {
+    return false;
+  }
+
+  const boundaries = wordBoundaries(match.segment.text);
+  // 自动写回必须尊重当前文本的自然词边界，否则会把“Spade”里的“Spa”、
+  // “其中有”里的“中有”这类切片误召唤为实体；这些候选仍可留给后续调查通道。
+  return !boundaries.has(match.match.start) || !boundaries.has(match.match.end);
+}
+
+function needsSegmenterBoundaryCheck(text: string): boolean {
+  return /[\p{Script=Han}\p{Script=Latin}]/u.test(text);
+}
+
+const segmenter =
+  typeof (Intl as typeof Intl & { Segmenter?: unknown }).Segmenter ===
+  "function"
+    ? new (
+        Intl as typeof Intl & {
+          Segmenter: new (
+            locales: readonly string[],
+            options: { granularity: "word" },
+          ) => WordSegmenter;
+        }
+      ).Segmenter(["zh", "en"], { granularity: "word" })
+    : undefined;
+
+function wordBoundaries(text: string): Set<number> {
+  const boundaries = new Set([0, text.length]);
+  if (segmenter === undefined) {
+    return boundaries;
+  }
+  for (const segment of segmenter.segment(text)) {
+    boundaries.add(segment.index);
+    boundaries.add(segment.index + segment.segment.length);
+  }
+  return boundaries;
 }
 
 function clusterSurfaceMatches(

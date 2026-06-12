@@ -110,7 +110,7 @@ describe("note view renderer", () => {
     ).toBe("[[wiki/北京|北京]][[wiki/大学|大学]]");
   });
 
-  it("uses the longest non-overlapping unique match for unresolved conflicts", () => {
+  it("keeps unresolved conflicts unchanged in the view", () => {
     expect(
       renderNoteView(
         "北京大学",
@@ -135,7 +135,7 @@ describe("note view renderer", () => {
         },
         renderOptions,
       ),
-    ).toBe("[[wiki/北京大学|北京大学]]");
+    ).toBe("北京大学");
   });
 
   it("does not apply stale replacements inside protected table syntax", () => {
