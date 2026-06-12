@@ -69,8 +69,8 @@ export function shouldReportEntity(input: {
     }
   }
 
-  // 一票否决之外进入生存竞争：没有任何提示词时不惩罚孤立实体；有提示词时让正负证据相互抵消。
-  return !hasScoredColor || score >= MIN_SURVIVAL_SCORE;
+  // 一票否决之外进入生存竞争：必须有微弱正向优势，零提示词和正负刚好抵消都不自动召唤。
+  return hasScoredColor && score > MIN_SURVIVAL_SCORE;
 }
 
 function colorScore(color: EntityColorValue): number {

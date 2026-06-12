@@ -23,13 +23,13 @@ describe("entity policy", () => {
     ).toBe(true);
   });
 
-  it("reports isolated entities without scored color evidence", () => {
+  it("does not report isolated entities without scored color evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
         colors: [],
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("uses broad positive anchors as survival evidence", () => {
@@ -87,13 +87,25 @@ describe("entity policy", () => {
     ).toBe(false);
   });
 
-  it("accepts entities whose positive and negative evidence offset each other", () => {
+  it("rejects entities whose positive and negative evidence exactly offset each other", () => {
     expect(
       shouldReportEntity({
         flags: 0,
         colors: [
           { anchorId: 1, distance: 2 },
           { anchorId: 18, distance: 2 },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts entities with a weak positive survival advantage", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [
+          { anchorId: 1, distance: 2 },
+          { anchorId: 18, distance: 3 },
         ],
       }),
     ).toBe(true);

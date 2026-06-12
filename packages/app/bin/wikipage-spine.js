@@ -1037,7 +1037,7 @@ function shouldReportEntity(input) {
       score += value;
     }
   }
-  return !hasScoredColor || score >= MIN_SURVIVAL_SCORE;
+  return hasScoredColor && score > MIN_SURVIVAL_SCORE;
 }
 function colorScore(color) {
   const positiveWeight = POSITIVE_ANCHOR_WEIGHTS.get(color.anchorId);
