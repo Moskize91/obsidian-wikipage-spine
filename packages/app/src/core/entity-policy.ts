@@ -5,19 +5,44 @@ export interface EntityColorValue {
 
 export const ENTITY_FLAG_DISAMBIGUATION = 1;
 
-const POSITIVE_ANCHOR_MAX_DISTANCE = new Map<number, number>([
-  [6, 2], // school of thought
-  [8, 1], // technical term
-  [9, 1], // religious text
-  [12, 1], // literary work
-  [14, 1], // university
+const VETO_NEGATIVE_ANCHOR_IDS = new Set<number>([
+  15, // Wikimedia disambiguation page
+  16, // part of speech
+  17, // grammeme
+  21, // punctuation mark
 ]);
 
-const NEGATIVE_ANCHOR_IDS = new Set<number>([
-  15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+const VETO_NEGATIVE_MAX_DISTANCE = 2;
+const MIN_SURVIVAL_SCORE = 0;
+
+const POSITIVE_ANCHOR_WEIGHTS = new Map<number, number>([
+  [0, 1], // human
+  [1, 4], // academic discipline
+  [2, 4], // specialty
+  [3, 5], // academic major
+  [4, 5], // religious concept
+  [5, 6], // philosophical concept
+  [6, 5], // school of thought
+  [7, 1], // term
+  [8, 3], // technical term
+  [9, 6], // religious text
+  [10, 2], // publication
+  [11, 1], // written work
+  [12, 4], // literary work
+  [13, 2], // organization
+  [14, 5], // university
 ]);
 
-const MAX_NEGATIVE_DISTANCE = 2;
+const NEGATIVE_ANCHOR_WEIGHTS = new Map<number, number>([
+  [18, 4], // linguistic unit
+  [19, 5], // word
+  [20, 4], // sign
+  [22, 3], // type
+  [23, 3], // class
+  [24, 3], // type of work
+  [25, 3], // type of event
+  [26, 3], // type of process
+]);
 
 export function shouldReportEntity(input: {
   flags: number;
@@ -27,27 +52,51 @@ export function shouldReportEntity(input: {
     return false;
   }
 
-  let hasPositive = false;
+  let score = 0;
+  let hasScoredColor = false;
   for (const color of input.colors) {
     if (
-      NEGATIVE_ANCHOR_IDS.has(color.anchorId) &&
-      color.distance <= MAX_NEGATIVE_DISTANCE
+      VETO_NEGATIVE_ANCHOR_IDS.has(color.anchorId) &&
+      color.distance <= VETO_NEGATIVE_MAX_DISTANCE
     ) {
       return false;
     }
-    const maxPositiveDistance = POSITIVE_ANCHOR_MAX_DISTANCE.get(
-      color.anchorId,
-    );
-    if (
-      maxPositiveDistance !== undefined &&
-      color.distance > 0 &&
-      color.distance <= maxPositiveDistance
-    ) {
-      hasPositive = true;
+
+    const value = colorScore(color);
+    if (value !== 0) {
+      hasScoredColor = true;
+      score += value;
     }
   }
 
-  // 泛化锚点会把普通词带进来；自动写入只接受近距离、领域性明确的色卡证据。
-  // 色卡没有命中正向锚点时，当前 sync 不自动写入；后续 investigate 通道会处理孤立实体。
-  return hasPositive;
+  // 一票否决之外进入生存竞争：没有任何提示词时不惩罚孤立实体；有提示词时让正负证据相互抵消。
+  return !hasScoredColor || score >= MIN_SURVIVAL_SCORE;
+}
+
+function colorScore(color: EntityColorValue): number {
+  const positiveWeight = POSITIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (positiveWeight !== undefined) {
+    return positiveWeight * distanceWeight(color.distance);
+  }
+  const negativeWeight = NEGATIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (negativeWeight !== undefined) {
+    return -negativeWeight * distanceWeight(color.distance);
+  }
+  return 0;
+}
+
+function distanceWeight(distance: number): number {
+  if (distance === 0) {
+    return 1.5;
+  }
+  if (distance <= 1) {
+    return 1;
+  }
+  if (distance <= 2) {
+    return 0.7;
+  }
+  if (distance <= 4) {
+    return 0.35;
+  }
+  return 0.15;
 }

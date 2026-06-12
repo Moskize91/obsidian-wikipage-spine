@@ -14,7 +14,7 @@ describe("entity policy", () => {
     ).toBe(false);
   });
 
-  it("reports entities near positive anchors", () => {
+  it("reports entities with positive color evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
@@ -23,34 +23,46 @@ describe("entity policy", () => {
     ).toBe(true);
   });
 
-  it("does not auto-report entities that only hit broad religious-concept anchors", () => {
+  it("reports isolated entities without scored color evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
-        colors: [{ anchorId: 4, distance: 1 }],
+        colors: [],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("does not report entities that only hit broad positive anchors", () => {
+  it("uses broad positive anchors as survival evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
         colors: [{ anchorId: 1, distance: 2 }],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("does not report anchor entities themselves", () => {
+  it("reports positive anchor entities themselves", () => {
     expect(
       shouldReportEntity({
         flags: 0,
         colors: [{ anchorId: 1, distance: 0 }],
       }),
+    ).toBe(true);
+  });
+
+  it("vetoes entities near selected negative anchors", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [
+          { anchorId: 6, distance: 1 },
+          { anchorId: 16, distance: 1 },
+        ],
+      }),
     ).toBe(false);
   });
 
-  it("suppresses entities near negative anchors", () => {
+  it("lets positive evidence offset non-veto negative evidence", () => {
     expect(
       shouldReportEntity({
         flags: 0,
@@ -59,36 +71,31 @@ describe("entity policy", () => {
           { anchorId: 18, distance: 1 },
         ],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("ignores distant negative anchors", () => {
+  it("rejects entities whose non-veto negative evidence wins survival scoring", () => {
     expect(
       shouldReportEntity({
         flags: 0,
         colors: [
-          { anchorId: 6, distance: 1 },
-          { anchorId: 18, distance: 5 },
+          { anchorId: 1, distance: 5 },
+          { anchorId: 18, distance: 1 },
+          { anchorId: 19, distance: 2 },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts entities whose positive and negative evidence offset each other", () => {
+    expect(
+      shouldReportEntity({
+        flags: 0,
+        colors: [
+          { anchorId: 1, distance: 2 },
+          { anchorId: 18, distance: 2 },
         ],
       }),
     ).toBe(true);
-  });
-
-  it("does not auto-report entities without positive color evidence", () => {
-    expect(
-      shouldReportEntity({
-        flags: 0,
-        colors: [],
-      }),
-    ).toBe(false);
-  });
-
-  it("does not auto-report entities whose positive anchors are too distant", () => {
-    expect(
-      shouldReportEntity({
-        flags: 0,
-        colors: [{ anchorId: 1, distance: 5 }],
-      }),
-    ).toBe(false);
   });
 });

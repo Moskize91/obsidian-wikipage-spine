@@ -1025,52 +1025,113 @@ function shouldReportEntity(input) {
   if ((input.flags & ENTITY_FLAG_DISAMBIGUATION) !== 0) {
     return false;
   }
-  let hasPositive = false;
+  let score = 0;
+  let hasScoredColor = false;
   for (const color of input.colors) {
-    if (NEGATIVE_ANCHOR_IDS.has(color.anchorId) && color.distance <= MAX_NEGATIVE_DISTANCE) {
+    if (VETO_NEGATIVE_ANCHOR_IDS.has(color.anchorId) && color.distance <= VETO_NEGATIVE_MAX_DISTANCE) {
       return false;
     }
-    const maxPositiveDistance = POSITIVE_ANCHOR_MAX_DISTANCE.get(
-      color.anchorId
-    );
-    if (maxPositiveDistance !== void 0 && color.distance > 0 && color.distance <= maxPositiveDistance) {
-      hasPositive = true;
+    const value = colorScore(color);
+    if (value !== 0) {
+      hasScoredColor = true;
+      score += value;
     }
   }
-  return hasPositive;
+  return !hasScoredColor || score >= MIN_SURVIVAL_SCORE;
 }
-var ENTITY_FLAG_DISAMBIGUATION, POSITIVE_ANCHOR_MAX_DISTANCE, NEGATIVE_ANCHOR_IDS, MAX_NEGATIVE_DISTANCE;
+function colorScore(color) {
+  const positiveWeight = POSITIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (positiveWeight !== void 0) {
+    return positiveWeight * distanceWeight(color.distance);
+  }
+  const negativeWeight = NEGATIVE_ANCHOR_WEIGHTS.get(color.anchorId);
+  if (negativeWeight !== void 0) {
+    return -negativeWeight * distanceWeight(color.distance);
+  }
+  return 0;
+}
+function distanceWeight(distance) {
+  if (distance === 0) {
+    return 1.5;
+  }
+  if (distance <= 1) {
+    return 1;
+  }
+  if (distance <= 2) {
+    return 0.7;
+  }
+  if (distance <= 4) {
+    return 0.35;
+  }
+  return 0.15;
+}
+var ENTITY_FLAG_DISAMBIGUATION, VETO_NEGATIVE_ANCHOR_IDS, VETO_NEGATIVE_MAX_DISTANCE, MIN_SURVIVAL_SCORE, POSITIVE_ANCHOR_WEIGHTS, NEGATIVE_ANCHOR_WEIGHTS;
 var init_entity_policy = __esm({
   "src/core/entity-policy.ts"() {
     "use strict";
     ENTITY_FLAG_DISAMBIGUATION = 1;
-    POSITIVE_ANCHOR_MAX_DISTANCE = /* @__PURE__ */ new Map([
-      [6, 2],
+    VETO_NEGATIVE_ANCHOR_IDS = /* @__PURE__ */ new Set([
+      15,
+      // Wikimedia disambiguation page
+      16,
+      // part of speech
+      17,
+      // grammeme
+      21
+      // punctuation mark
+    ]);
+    VETO_NEGATIVE_MAX_DISTANCE = 2;
+    MIN_SURVIVAL_SCORE = 0;
+    POSITIVE_ANCHOR_WEIGHTS = /* @__PURE__ */ new Map([
+      [0, 1],
+      // human
+      [1, 4],
+      // academic discipline
+      [2, 4],
+      // specialty
+      [3, 5],
+      // academic major
+      [4, 5],
+      // religious concept
+      [5, 6],
+      // philosophical concept
+      [6, 5],
       // school of thought
-      [8, 1],
+      [7, 1],
+      // term
+      [8, 3],
       // technical term
-      [9, 1],
+      [9, 6],
       // religious text
-      [12, 1],
+      [10, 2],
+      // publication
+      [11, 1],
+      // written work
+      [12, 4],
       // literary work
-      [14, 1]
+      [13, 2],
+      // organization
+      [14, 5]
       // university
     ]);
-    NEGATIVE_ANCHOR_IDS = /* @__PURE__ */ new Set([
-      15,
-      16,
-      17,
-      18,
-      19,
-      20,
-      21,
-      22,
-      23,
-      24,
-      25,
-      26
+    NEGATIVE_ANCHOR_WEIGHTS = /* @__PURE__ */ new Map([
+      [18, 4],
+      // linguistic unit
+      [19, 5],
+      // word
+      [20, 4],
+      // sign
+      [22, 3],
+      // type
+      [23, 3],
+      // class
+      [24, 3],
+      // type of work
+      [25, 3],
+      // type of event
+      [26, 3]
+      // type of process
     ]);
-    MAX_NEGATIVE_DISTANCE = 2;
   }
 });
 
